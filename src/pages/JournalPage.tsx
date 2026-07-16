@@ -4,7 +4,7 @@ import {
   type JournalEntry,
 } from '../db';
 import { streamChat } from '../ai/openrouter';
-import { getReflectionPrompt, buildMessages, ENCOURAGEMENT } from '../ai/prompts';
+import { getReflectionPrompt, buildMessages } from '../ai/prompts';
 import { getModel, getApiKey } from '../db';
 
 const MOODS = [
@@ -19,17 +19,20 @@ export default function JournalPage() {
   const [body, setBody] = useState('');
   const [mood, setMood] = useState<number | undefined>();
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [reflection, setReflection] = useState('');
-  const [reflecting, setReflecting] = useState(false);
-  const [recentEntries, setRecentEntries] = useState<JournalEntry[]>([]);
   const [wordCount, setWordCount] = useState(0);
+  const [recentEntries, setRecentEntries] = useState<JournalEntry[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [expandedEntry, setExpandedEntry] = useState<string | null>(null);
-  const [editingEntry, setEditingEntry] = useState<JournalEntry | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  // ─── Post-save reflection state ────────────────────
+  const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
+  const [reflection, setReflection] = useState('');
+  const [reflecting, setReflecting] = useState(false);
+  const [showContinue, setShowContinue] = useState(false);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -41,8 +44,7 @@ export default function JournalPage() {
   useEffect(() => { loadEntries(); }, [loadEntries]);
 
   useEffect(() => {
-    const words = body.split(/\s+/).filter(Boolean).length;
-    setWordCount(words);
+    setWordCount(body.split(/\s+/).filter(Boolean).length);
   }, [body]);
 
   // Auto-save draft
@@ -50,10 +52,7 @@ export default function JournalPage() {
     if (text.trim().length < 10) return;
     const drafts = recentEntries.filter(e => e.isDraft);
     if (drafts.length > 0) {
-      await updateEntry(drafts[0].id, {
-        body: text,
-        wordCount: text.split(/\s+/).filter(Boolean).length,
-      });
+      await updateEntry(drafts[0].id, { body: text, wordCount: text.split(/\s+/).filter(Boolean).length });
     } else {
       await saveDraft(text);
     }
@@ -61,32 +60,14 @@ export default function JournalPage() {
 
   useEffect(() => {
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
-    if (body.trim().length >= 10) {
+    if (body.trim().length >= 10 && !activeEntryId) {
       autoSaveTimer.current = setTimeout(() => autoSave(body), 5000);
     }
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
-  }, [body, autoSave]);
+  }, [body, autoSave, activeEntryId]);
 
-  const handleSave = async () => {
-    if (!body.trim()) return;
-    setSaving(true);
-    try {
-      const entry = await saveEntry(body, mood);
-      if (mood) await logMood(mood, entry.id);
-      setSaved(true);
-      setBody('');
-      setMood(undefined);
-      setReflection('');
-      await loadEntries();
-      setTimeout(() => setSaved(false), 3000);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  // ─── Reflect on current editor text ────────────────
-  const handleReflect = async () => {
-    if (!body.trim()) return;
+  // ─── Auto-reflect after save ───────────────────────
+  const runReflection = async (entryBody: string, entryId: string) => {
     setReflecting(true);
     setReflection('');
     try {
@@ -94,12 +75,14 @@ export default function JournalPage() {
       const model = await getModel();
       if (!apiKey) { setReflection('Set your API key in Settings first.'); return; }
 
-      const messages = getReflectionPrompt(body);
+      const messages = getReflectionPrompt(entryBody);
       let result = '';
       for await (const chunk of streamChat(messages, { apiKey, model })) {
         result += chunk;
         setReflection(result);
       }
+      await updateEntry(entryId, { aiReflection: result });
+      await loadEntries();
     } catch {
       setReflection('Could not generate reflection. Check your API key and model.');
     } finally {
@@ -107,76 +90,120 @@ export default function JournalPage() {
     }
   };
 
-  // ─── Reflect on a SAVED entry ──────────────────────
-  const handleReflectSaved = async (entry: JournalEntry) => {
-    const entryId = entry.id;
-    // Set reflecting state on this entry
-    setRecentEntries(prev => prev.map(e =>
-      e.id === entryId ? { ...e, aiReflection: '...' } : e
-    ));
-
-    try {
-      const apiKey = await getApiKey();
-      const model = await getModel();
-      if (!apiKey) return;
-
-      const messages = getReflectionPrompt(entry.body);
-      let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model })) {
-        result += chunk;
-        setRecentEntries(prev => prev.map(e =>
-          e.id === entryId ? { ...e, aiReflection: result } : e
-        ));
-      }
-      await updateEntry(entryId, { aiReflection: result });
-    } catch {
-      setRecentEntries(prev => prev.map(e =>
-        e.id === entryId ? { ...e, aiReflection: 'Could not generate reflection.' } : e
-      ));
-    }
-  };
-
-  // ─── Edit a saved entry ────────────────────────────
-  const handleEditEntry = (entry: JournalEntry) => {
-    setEditingEntry(entry);
-    setBody(entry.body);
-    setMood(entry.mood);
-    setReflection('');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  const handleSaveEdit = async () => {
-    if (!editingEntry || !body.trim()) return;
+  // ─── Save (new entry or update existing) ───────────
+  const handleSave = async () => {
+    if (!body.trim()) return;
     setSaving(true);
     try {
-      await updateEntry(editingEntry.id, {
-        body,
-        mood,
-        wordCount: body.split(/\s+/).filter(Boolean).length,
-      });
-      setEditingEntry(null);
-      setBody('');
-      setMood(undefined);
-      setReflection('');
+      let entryId = activeEntryId;
+
+      if (entryId) {
+        // Updating existing entry (continue writing)
+        await updateEntry(entryId, {
+          body,
+          mood,
+          wordCount: body.split(/\s+/).filter(Boolean).length,
+        });
+      } else {
+        // New entry
+        const entry = await saveEntry(body, mood);
+        entryId = entry.id;
+        if (mood) await logMood(mood, entry.id);
+        setActiveEntryId(entryId);
+      }
+
       await loadEntries();
+
+      // Auto-reflect on save
+      await runReflection(body, entryId!);
+
+      // Show continue option
+      setShowContinue(true);
     } finally {
       setSaving(false);
     }
   };
 
-  const handleCancelEdit = () => {
-    setEditingEntry(null);
+  // ─── Continue writing (load entry back into editor) ──
+  const handleContinue = async () => {
+    if (!activeEntryId) return;
+    const entry = await db.entries.get(activeEntryId);
+    if (entry) {
+      setBody(entry.body);
+      setMood(entry.mood);
+      setShowContinue(false);
+      setReflection('');
+      setActiveEntryId(entry.id);
+      textareaRef.current?.focus();
+    }
+  };
+
+  // ─── Done (finish this entry) ──────────────────────
+  const handleDone = () => {
     setBody('');
     setMood(undefined);
     setReflection('');
+    setActiveEntryId(null);
+    setShowContinue(false);
   };
 
-  // ─── Delete ────────────────────────────────────────
+  // ─── Reflect on demand (while editing) ─────────────
+  const handleReflectNow = async () => {
+    if (!body.trim()) return;
+    setReflecting(true);
+    setReflection('');
+    try {
+      const apiKey = await getApiKey();
+      const model = await getModel();
+      if (!apiKey) { setReflection('Set your API key in Settings.'); return; }
+      const messages = getReflectionPrompt(body);
+      let result = '';
+      for await (const chunk of streamChat(messages, { apiKey, model })) {
+        result += chunk;
+        setReflection(result);
+      }
+    } catch {
+      setReflection('Could not generate reflection.');
+    } finally {
+      setReflecting(false);
+    }
+  };
+
+  // ─── Expand / Edit / Delete (recent entries) ───────
+  const handleEditEntry = (entry: JournalEntry) => {
+    setActiveEntryId(entry.id);
+    setBody(entry.body);
+    setMood(entry.mood);
+    setReflection('');
+    setShowContinue(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const handleDelete = async (id: string) => {
     await deleteEntry(id);
     setConfirmDelete(null);
     setExpandedEntry(null);
+    if (activeEntryId === id) handleDone();
     await loadEntries();
+  };
+
+  const handleReflectSaved = async (entry: JournalEntry) => {
+    const id = entry.id;
+    setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: '...' } : e));
+    try {
+      const apiKey = await getApiKey();
+      const model = await getModel();
+      if (!apiKey) return;
+      const messages = getReflectionPrompt(entry.body);
+      let result = '';
+      for await (const chunk of streamChat(messages, { apiKey, model })) {
+        result += chunk;
+        setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: result } : e));
+      }
+      await updateEntry(id, { aiReflection: result });
+    } catch {
+      setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: 'Error.' } : e));
+    }
   };
 
   // ─── Topic suggestions ─────────────────────────────
@@ -187,21 +214,15 @@ export default function JournalPage() {
       const apiKey = await getApiKey();
       const model = await getModel();
       if (!apiKey) { setSuggestions(['Set your API key in Settings to get topic suggestions.']); return; }
-
-      const recentContext = recentEntries
-        .map(e => `[${e.created.split('T')[0]}] ${e.body.substring(0, 200)}`)
-        .join('\n');
-
+      const recentContext = recentEntries.map(e => `[${e.created.split('T')[0]}] ${e.body.substring(0, 200)}`).join('\n');
       const messages = buildMessages('topic', [], 'Suggest what I should write about today.', recentContext || undefined);
       let response = '';
-      for await (const chunk of streamChat(messages, { apiKey, model })) {
-        response += chunk;
-      }
+      for await (const chunk of streamChat(messages, { apiKey, model })) { response += chunk; }
       const lines = response.split('\n').filter(l => l.trim());
       const parsed = lines.map(l => l.replace(/^[-•*\d.]+\s*/, '').trim()).filter(Boolean);
       setSuggestions(parsed.length > 0 ? parsed : [response]);
     } catch {
-      setSuggestions(['Could not generate suggestions. Try again later.']);
+      setSuggestions(['Could not generate suggestions.']);
     } finally {
       setLoadingSuggestions(false);
     }
@@ -210,9 +231,11 @@ export default function JournalPage() {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
-      editingEntry ? handleSaveEdit() : handleSave();
+      handleSave();
     }
   };
+
+  const isEditing = !!activeEntryId;
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -220,10 +243,10 @@ export default function JournalPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-text-primary">
-            {editingEntry ? '✏️ Editing entry' : 'Journal'}
+            {isEditing ? '✏️ Continue writing' : 'Journal'}
           </h1>
           <p className="text-sm text-text-muted mt-1">
-            {editingEntry ? 'Make your changes, then save' : "What's on your mind?"}
+            {isEditing ? 'Your entry is saved. Add more or tap Done.' : "What's on your mind?"}
           </p>
         </div>
         <button
@@ -262,13 +285,6 @@ export default function JournalPage() {
         </div>
       )}
 
-      {/* Saved confirmation */}
-      {saved && (
-        <div className="bg-accent-green-dim border border-accent-green/30 rounded-xl p-4 animate-slide-up">
-          <p className="text-accent-green text-sm font-medium">✨ {ENCOURAGEMENT.firstEntry}</p>
-        </div>
-      )}
-
       {/* Editor */}
       <div className="bg-bg-card border border-border rounded-xl overflow-hidden">
         <textarea
@@ -301,25 +317,25 @@ export default function JournalPage() {
             ))}
           </div>
 
-          {/* Actions row */}
+          {/* Actions */}
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs text-text-dim shrink-0">
               {wordCount > 0 ? `${wordCount} word${wordCount !== 1 ? 's' : ''}` : ''}
             </span>
 
             <div className="flex items-center gap-2">
-              {editingEntry && (
+              {isEditing && (
                 <button
-                  onClick={handleCancelEdit}
+                  onClick={handleDone}
                   className="px-3 py-2 text-xs border border-border rounded-lg
                              text-text-secondary hover:bg-bg-hover transition-colors shrink-0"
                 >
-                  Cancel
+                  Done
                 </button>
               )}
 
               <button
-                onClick={handleReflect}
+                onClick={handleReflectNow}
                 disabled={!body.trim() || reflecting}
                 className="px-3 py-2 text-xs bg-bg-secondary border border-border rounded-lg
                            text-text-secondary hover:text-accent-purple hover:border-accent-purple
@@ -329,13 +345,13 @@ export default function JournalPage() {
               </button>
 
               <button
-                onClick={editingEntry ? handleSaveEdit : handleSave}
+                onClick={handleSave}
                 disabled={!body.trim() || saving}
                 className="px-4 py-2 text-xs bg-accent-green text-bg-primary font-medium rounded-lg
                            hover:bg-accent-green/90 transition-colors
                            disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
               >
-                {saving ? 'Saving...' : editingEntry ? 'Update' : 'Save'}
+                {saving ? 'Saving...' : isEditing ? 'Update' : 'Save'}
               </button>
             </div>
           </div>
@@ -344,15 +360,34 @@ export default function JournalPage() {
 
       <p className="text-xs text-text-dim text-center">Ctrl+Enter to save</p>
 
-      {/* AI Reflection (on current text) */}
+      {/* ─── Post-save: Reflection + Continue ──────── */}
       {reflection && (
-        <div className="bg-bg-card border border-accent-purple/30 rounded-xl p-5 animate-slide-up">
-          <h3 className="text-sm font-medium text-accent-purple mb-2">🪞 Reflection</h3>
+        <div className="bg-bg-card border border-accent-purple/30 rounded-xl p-5 animate-slide-up space-y-3">
+          <h3 className="text-sm font-medium text-accent-purple">🪞 Reflection</h3>
           <p className="text-text-secondary text-sm leading-relaxed whitespace-pre-wrap">{reflection}</p>
+
+          {showContinue && (
+            <div className="flex items-center gap-2 pt-2 border-t border-border">
+              <button
+                onClick={handleContinue}
+                className="px-4 py-2 text-xs bg-accent-blue/10 border border-accent-blue/30
+                           text-accent-blue rounded-lg hover:bg-accent-blue/20 transition-colors"
+              >
+                ✏️ Continue writing
+              </button>
+              <button
+                onClick={handleDone}
+                className="px-4 py-2 text-xs bg-bg-secondary border border-border
+                           text-text-secondary rounded-lg hover:bg-bg-hover transition-colors"
+              >
+                ✓ Done
+              </button>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Recent entries */}
+      {/* ─── Recent entries ────────────────────────── */}
       {recentEntries.length > 0 && (
         <div className="space-y-2">
           <h3 className="text-sm font-medium text-text-muted">Recent entries</h3>
@@ -360,7 +395,6 @@ export default function JournalPage() {
             const isExpanded = expandedEntry === entry.id;
             return (
               <div key={entry.id} className="bg-bg-card border border-border rounded-xl overflow-hidden">
-                {/* Collapsed view — tap to expand */}
                 <button
                   onClick={() => setExpandedEntry(isExpanded ? null : entry.id)}
                   className="w-full text-left px-4 py-3 hover:bg-bg-hover transition-colors"
@@ -380,14 +414,10 @@ export default function JournalPage() {
                   <p className="text-sm text-text-secondary mt-1 line-clamp-2">{entry.body}</p>
                 </button>
 
-                {/* Expanded view */}
                 {isExpanded && (
                   <div className="px-4 pb-3 border-t border-border animate-slide-up">
-                    <p className="text-sm text-text-secondary leading-relaxed mt-3 whitespace-pre-wrap">
-                      {entry.body}
-                    </p>
+                    <p className="text-sm text-text-secondary leading-relaxed mt-3 whitespace-pre-wrap">{entry.body}</p>
 
-                    {/* AI Reflection on saved entry */}
                     {entry.aiReflection && (
                       <div className="mt-3 p-3 bg-accent-purple/5 border border-accent-purple/20 rounded-lg">
                         <p className="text-xs text-accent-purple font-medium mb-1">🪞 Reflection</p>
@@ -395,48 +425,35 @@ export default function JournalPage() {
                       </div>
                     )}
 
-                    {/* Actions */}
                     <div className="flex items-center gap-2 mt-3">
                       <button
                         onClick={() => handleReflectSaved(entry)}
                         className="px-3 py-1.5 text-xs bg-bg-secondary border border-border rounded-lg
-                                   text-text-secondary hover:text-accent-purple hover:border-accent-purple
-                                   transition-colors"
+                                   text-text-secondary hover:text-accent-purple hover:border-accent-purple transition-colors"
                       >
                         🪞 Reflect
                       </button>
                       <button
-                        onClick={() => handleEditEntry(entry)}
+                        onClick={() => { handleEditEntry(entry); setExpandedEntry(null); }}
                         className="px-3 py-1.5 text-xs bg-bg-secondary border border-border rounded-lg
-                                   text-text-secondary hover:text-accent-blue hover:border-accent-blue
-                                   transition-colors"
+                                   text-text-secondary hover:text-accent-blue hover:border-accent-blue transition-colors"
                       >
                         ✏️ Edit
                       </button>
                       {confirmDelete === entry.id ? (
                         <div className="flex items-center gap-1 ml-auto">
-                          <button
-                            onClick={() => handleDelete(entry.id)}
-                            className="px-3 py-1.5 text-xs bg-red-500/20 border border-red-500/30 rounded-lg
-                                       text-red-400 hover:bg-red-500/30 transition-colors"
-                          >
+                          <button onClick={() => handleDelete(entry.id)}
+                            className="px-3 py-1.5 text-xs bg-red-500/20 border border-red-500/30 rounded-lg text-red-400 hover:bg-red-500/30 transition-colors">
                             Delete
                           </button>
-                          <button
-                            onClick={() => setConfirmDelete(null)}
-                            className="px-3 py-1.5 text-xs border border-border rounded-lg
-                                       text-text-dim hover:bg-bg-hover transition-colors"
-                          >
+                          <button onClick={() => setConfirmDelete(null)}
+                            className="px-3 py-1.5 text-xs border border-border rounded-lg text-text-dim hover:bg-bg-hover transition-colors">
                             Cancel
                           </button>
                         </div>
                       ) : (
-                        <button
-                          onClick={() => setConfirmDelete(entry.id)}
-                          className="px-3 py-1.5 text-xs border border-border rounded-lg
-                                     text-text-dim hover:text-red-400 hover:border-red-500/30
-                                     transition-colors ml-auto"
-                        >
+                        <button onClick={() => setConfirmDelete(entry.id)}
+                          className="px-3 py-1.5 text-xs border border-border rounded-lg text-text-dim hover:text-red-400 hover:border-red-500/30 transition-colors ml-auto">
                           🗑️
                         </button>
                       )}
@@ -451,3 +468,6 @@ export default function JournalPage() {
     </div>
   );
 }
+
+// Need db import for handleContinue
+import { db } from '../db';
