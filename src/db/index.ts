@@ -267,7 +267,7 @@ export async function calculateStreak(): Promise<{ current: number; longest: num
     }
   }
 
-  // Longest streak
+  // Longest streak (iterate oldest-first so prev is always earlier)
   let longest = 0;
   let tempStreak = 0;
   let prevDate: string | null = null;
@@ -276,11 +276,11 @@ export async function calculateStreak(): Promise<{ current: number; longest: num
     if (prevDate) {
       const prev = new Date(prevDate);
       const curr = new Date(date as string);
-      const diff = (prev.getTime() - curr.getTime()) / 86400000;
+      const diff = (curr.getTime() - prev.getTime()) / 86400000;
       if (diff === 1) {
         tempStreak++;
       } else if (diff === 2) {
-        // forgiving
+        // forgiving — allow one gap
         tempStreak++;
       } else {
         tempStreak = 1;

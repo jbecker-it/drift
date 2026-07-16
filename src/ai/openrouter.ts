@@ -26,7 +26,7 @@ export async function* streamChat(
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${config.apiKey}`,
-      'HTTP-Referer': 'http://localhost:5173',
+      'HTTP-Referer': window.location.origin,
       'X-Title': 'Drift Journal',
     },
     body: JSON.stringify({
@@ -85,7 +85,7 @@ export async function chatComplete(
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${config.apiKey}`,
-      'HTTP-Referer': 'http://localhost:5173',
+      'HTTP-Referer': window.location.origin,
       'X-Title': 'Drift Journal',
     },
     body: JSON.stringify({

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  saveEntry, saveDraft, getRecentEntries, logMood, updateEntry, deleteEntry,
+  saveEntry, saveDraft, getRecentEntries, logMood, updateEntry, deleteEntry, db,
   type JournalEntry,
 } from '../db';
 import { streamChat } from '../ai/openrouter';
@@ -470,4 +470,4 @@ export default function JournalPage() {
 }
 
 // Need db import for handleContinue
-import { db } from '../db';
+// db already imported at top

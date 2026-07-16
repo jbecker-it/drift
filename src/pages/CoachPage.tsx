@@ -35,7 +35,8 @@ export default function CoachPage() {
     setMessages([]);
 
     if (greeting) {
-      await handleSend(greeting, type);
+      // Use a timeout to let the state clear before sending
+      setTimeout(() => handleSend(greeting, type), 50);
     }
   };
 
