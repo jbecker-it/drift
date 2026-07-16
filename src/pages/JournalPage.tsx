@@ -222,15 +222,15 @@ export default function JournalPage() {
         />
 
         {/* Bottom bar */}
-        <div className="px-5 py-3 border-t border-border flex items-center justify-between">
+        <div className="px-4 py-3 border-t border-border">
           {/* Mood selector */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 mb-3">
             <span className="text-xs text-text-dim mr-1">Mood:</span>
             {MOODS.map(m => (
               <button
                 key={m.value}
                 onClick={() => setMood(mood === m.value ? undefined : m.value)}
-                className={`text-xl transition-transform hover:scale-110 ${
+                className={`text-lg transition-transform hover:scale-110 ${
                   mood === m.value ? 'scale-125 ring-2 ring-accent-green rounded-full' : 'opacity-50'
                 }`}
                 title={m.label}
@@ -240,31 +240,33 @@ export default function JournalPage() {
             ))}
           </div>
 
-          {/* Word count + actions */}
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-text-dim">
+          {/* Actions row */}
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-text-dim shrink-0">
               {wordCount > 0 ? `${wordCount} word${wordCount !== 1 ? 's' : ''}` : ''}
             </span>
 
-            <button
-              onClick={handleReflect}
-              disabled={!body.trim() || reflecting}
-              className="px-4 py-2 text-sm bg-bg-secondary border border-border rounded-lg
-                         text-text-secondary hover:text-accent-purple hover:border-accent-purple
-                         transition-colors disabled:opacity-40"
-            >
-              {reflecting ? 'Reflecting...' : '🪞 Reflect'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleReflect}
+                disabled={!body.trim() || reflecting}
+                className="px-3 py-2 text-xs bg-bg-secondary border border-border rounded-lg
+                           text-text-secondary hover:text-accent-purple hover:border-accent-purple
+                           transition-colors disabled:opacity-40 shrink-0"
+              >
+                {reflecting ? 'Reflecting...' : '🪞 Reflect'}
+              </button>
 
-            <button
-              onClick={handleSave}
-              disabled={!body.trim() || saving}
-              className="px-5 py-2 text-sm bg-accent-green text-bg-primary font-medium rounded-lg
-                         hover:bg-accent-green/90 transition-colors
-                         disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {saving ? 'Saving...' : 'Save'}
-            </button>
+              <button
+                onClick={handleSave}
+                disabled={!body.trim() || saving}
+                className="px-4 py-2 text-xs bg-accent-green text-bg-primary font-medium rounded-lg
+                           hover:bg-accent-green/90 transition-colors
+                           disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+              >
+                {saving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
           </div>
         </div>
       </div>
