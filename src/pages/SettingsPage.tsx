@@ -1,13 +1,12 @@
-import { useState, useEffect } from 'react';
-import { getApiKey, getModel, getPersonality, setSetting, exportAllData, clearAllData } from '../db';
-
-const MODELS = [
-  { id: 'xiaomi/mimo-v2.5', label: 'MiMo v2.5 (Default)' },
-  { id: 'openai/gpt-4o-mini', label: 'GPT-4o Mini' },
-  { id: 'anthropic/claude-3.5-sonnet', label: 'Claude 3.5 Sonnet' },
-  { id: 'google/gemini-2.0-flash-001', label: 'Gemini 2.0 Flash' },
-  { id: 'meta-llama/llama-3.1-8b-instruct', label: 'Llama 3.1 8B' },
-];
+import { useState, useEffect, useMemo } from 'react';
+import {
+  getApiKey, getModel, getPersonality, setSetting,
+  exportAllData, clearAllData,
+} from '../db';
+import {
+  fetchModels, filterModels, isFree, getFreeOnlySetting, setFreeOnlySetting,
+  type OpenRouterModel,
+} from '../ai/models';
 
 const PERSONALITIES = [
   { id: 'coach', label: 'Coach', icon: '🏆' },
@@ -19,19 +18,68 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('xiaomi/mimo-v2.5');
   const [personality, setPersonality] = useState('coach');
+  const [freeOnly, setFreeOnly] = useState(false);
   const [saved, setSaved] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
 
-  useEffect(() => {
-    loadData();
-  }, []);
+  const [allModels, setAllModels] = useState<OpenRouterModel[]>([]);
+  const [loadingModels, setLoadingModels] = useState(true);
+  const [modelError, setModelError] = useState('');
+  const [modelSearch, setModelSearch] = useState('');
+
+  useEffect(() => { loadData(); }, []);
 
   const loadData = async () => {
-    const [key, mod, pers] = await Promise.all([getApiKey(), getModel(), getPersonality()]);
+    const [key, mod, pers, free] = await Promise.all([
+      getApiKey(), getModel(), getPersonality(), getFreeOnlySetting(),
+    ]);
     if (key) setApiKey(key);
     setModel(mod);
     setPersonality(pers);
+    setFreeOnly(free);
+
+    // Load models
+    setLoadingModels(true);
+    try {
+      const models = await fetchModels();
+      setAllModels(models);
+    } catch (err: any) {
+      setModelError(err.message || 'Failed to load models');
+    } finally {
+      setLoadingModels(false);
+    }
+  };
+
+  const displayModels = useMemo(() => {
+    const filtered = filterModels(allModels, freeOnly);
+    if (!modelSearch) return filtered;
+    const q = modelSearch.toLowerCase();
+    return filtered.filter(m =>
+      m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
+    );
+  }, [allModels, freeOnly, modelSearch]);
+
+  const freeCount = allModels.filter(isFree).length;
+
+  const handleFreeOnlyToggle = async () => {
+    const next = !freeOnly;
+    setFreeOnly(next);
+    await setFreeOnlySetting(next);
+    setModelSearch('');
+  };
+
+  const handleRefreshModels = async () => {
+    setLoadingModels(true);
+    setModelError('');
+    try {
+      const models = await fetchModels(true);
+      setAllModels(models);
+    } catch (err: any) {
+      setModelError(err.message || 'Failed to refresh');
+    } finally {
+      setLoadingModels(false);
+    }
   };
 
   const handleSave = async () => {
@@ -56,10 +104,7 @@ export default function SettingsPage() {
   };
 
   const handleClear = async () => {
-    if (!confirmClear) {
-      setConfirmClear(true);
-      return;
-    }
+    if (!confirmClear) { setConfirmClear(true); return; }
     await clearAllData();
     setConfirmClear(false);
     window.location.reload();
@@ -103,31 +148,127 @@ export default function SettingsPage() {
         </p>
       </div>
 
-      {/* Model */}
+      {/* Free / Paid toggle */}
       <div className="bg-bg-card border border-border rounded-xl p-5 space-y-3">
-        <h3 className="text-sm font-medium text-text-secondary">AI Model</h3>
-        <div className="space-y-2">
-          {MODELS.map(m => (
-            <label
-              key={m.id}
-              className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
-                model === m.id
-                  ? 'bg-accent-green-dim border border-accent-green/30'
-                  : 'hover:bg-bg-hover border border-transparent'
-              }`}
-            >
-              <input
-                type="radio"
-                name="model"
-                value={m.id}
-                checked={model === m.id}
-                onChange={() => setModel(m.id)}
-                className="accent-accent-green"
-              />
-              <span className="text-sm text-text-primary">{m.label}</span>
-            </label>
-          ))}
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium text-text-secondary">Model tier</h3>
+            <p className="text-xs text-text-dim mt-0.5">
+              {freeOnly
+                ? `Showing free models only (${freeCount} available)`
+                : `Showing all ${allModels.length} models`
+              }
+            </p>
+          </div>
+          <button
+            onClick={handleFreeOnlyToggle}
+            className={`relative w-14 h-7 rounded-full transition-colors ${
+              freeOnly ? 'bg-accent-green' : 'bg-bg-hover'
+            }`}
+          >
+            <span className={`absolute top-0.5 w-6 h-6 rounded-full bg-white shadow transition-transform ${
+              freeOnly ? 'translate-x-7' : 'translate-x-0.5'
+            }`} />
+          </button>
         </div>
+        <div className="flex items-center gap-2 text-xs text-text-dim">
+          <span className={!freeOnly ? 'text-accent-green font-medium' : ''}>All</span>
+          <span>·</span>
+          <span className={freeOnly ? 'text-accent-green font-medium' : ''}>Free only</span>
+        </div>
+      </div>
+
+      {/* Model picker */}
+      <div className="bg-bg-card border border-border rounded-xl p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-medium text-text-secondary">AI Model</h3>
+          <button
+            onClick={handleRefreshModels}
+            disabled={loadingModels}
+            className="text-xs text-accent-blue hover:text-accent-blue/80 transition-colors
+                       disabled:opacity-40"
+          >
+            {loadingModels ? 'Loading...' : '↻ Refresh'}
+          </button>
+        </div>
+
+        {/* Search */}
+        <div className="relative">
+          <input
+            type="text"
+            value={modelSearch}
+            onChange={(e) => setModelSearch(e.target.value)}
+            placeholder="Search models..."
+            className="w-full px-4 py-2.5 bg-bg-input border border-border rounded-xl
+                       text-text-primary placeholder:text-text-dim text-sm
+                       focus:border-accent-green focus:ring-1 focus:ring-accent-green
+                       transition-colors"
+          />
+          {modelSearch && (
+            <button
+              onClick={() => setModelSearch('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim hover:text-text-secondary"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
+        {modelError && (
+          <p className="text-xs text-red-400">{modelError}</p>
+        )}
+
+        {/* Model list */}
+        <div className="max-h-[400px] overflow-y-auto space-y-1 border border-border rounded-xl divide-y divide-border">
+          {loadingModels ? (
+            <div className="p-4 text-center text-text-dim text-sm animate-pulse-gentle">
+              Fetching models from OpenRouter...
+            </div>
+          ) : displayModels.length === 0 ? (
+            <div className="p-4 text-center text-text-dim text-sm">
+              No models found{modelSearch ? ` for "${modelSearch}"` : ''}.
+            </div>
+          ) : (
+            displayModels.map(m => (
+              <button
+                key={m.id}
+                onClick={() => setModel(m.id)}
+                className={`w-full text-left px-4 py-3 transition-colors ${
+                  model === m.id
+                    ? 'bg-accent-green-dim'
+                    : 'hover:bg-bg-hover'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className={`text-sm font-medium truncate ${
+                        model === m.id ? 'text-accent-green' : 'text-text-primary'
+                      }`}>
+                        {m.name}
+                      </span>
+                      {isFree(m) && (
+                        <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium bg-accent-green-dim text-accent-green rounded">
+                          FREE
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-text-dim truncate block">{m.id}</span>
+                  </div>
+                  {model === m.id && (
+                    <span className="shrink-0 text-accent-green">✓</span>
+                  )}
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+
+        {!loadingModels && displayModels.length > 0 && (
+          <p className="text-xs text-text-dim text-center">
+            Showing {displayModels.length} of {allModels.length} models
+          </p>
+        )}
       </div>
 
       {/* Personality */}
@@ -163,7 +304,6 @@ export default function SettingsPage() {
       {/* Data management */}
       <div className="bg-bg-card border border-border rounded-xl p-5 space-y-4">
         <h3 className="text-sm font-medium text-text-secondary">Data</h3>
-
         <button
           onClick={handleExport}
           className="w-full py-2.5 border border-border rounded-xl text-sm text-text-secondary
@@ -171,7 +311,6 @@ export default function SettingsPage() {
         >
           📦 Export all data as JSON
         </button>
-
         <button
           onClick={handleClear}
           className="w-full py-2.5 border border-red-500/30 rounded-xl text-sm text-red-400
