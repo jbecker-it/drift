@@ -35,6 +35,7 @@ export default function JournalPage() {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftIdRef = useRef<string | null>(null);
 
   const loadEntries = useCallback(async () => {
     const entries = await getRecentEntries(10);
@@ -50,13 +51,13 @@ export default function JournalPage() {
   // Auto-save draft
   const autoSave = useCallback(async (text: string) => {
     if (text.trim().length < 10) return;
-    const drafts = recentEntries.filter(e => e.isDraft);
-    if (drafts.length > 0) {
-      await updateEntry(drafts[0].id, { body: text, wordCount: text.split(/\s+/).filter(Boolean).length });
+    if (draftIdRef.current) {
+      await updateEntry(draftIdRef.current, { body: text, wordCount: text.split(/\s+/).filter(Boolean).length });
     } else {
-      await saveDraft(text);
+      const draft = await saveDraft(text);
+      draftIdRef.current = draft.id;
     }
-  }, [recentEntries]);
+  }, []);
 
   useEffect(() => {
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
@@ -110,6 +111,11 @@ export default function JournalPage() {
         entryId = entry.id;
         if (mood) await logMood(mood, entry.id);
         setActiveEntryId(entryId);
+        // Clean up any auto-saved draft
+        if (draftIdRef.current) {
+          await deleteEntry(draftIdRef.current);
+          draftIdRef.current = null;
+        }
       }
 
       await loadEntries();
@@ -145,6 +151,7 @@ export default function JournalPage() {
     setReflection('');
     setActiveEntryId(null);
     setShowContinue(false);
+    draftIdRef.current = null;
   };
 
   // ─── Reflect on demand (while editing) ─────────────

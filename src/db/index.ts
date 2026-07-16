@@ -112,11 +112,11 @@ export async function getRecentEntries(limit: number = 10): Promise<JournalEntry
 }
 
 export async function getEntriesSince(date: Date): Promise<JournalEntry[]> {
-  return db.entries
+  const results = await db.entries
     .where('created')
     .above(date.toISOString())
-    .reverse()
-    .sortBy('created');
+    .toArray();
+  return results.sort((a, b) => b.created.localeCompare(a.created));
 }
 
 export async function getTodaysEntries(): Promise<JournalEntry[]> {

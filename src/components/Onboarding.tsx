@@ -49,7 +49,7 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
     if (apiKey && step === 2) {
       fetchAndSetModels();
     }
-  }, [step]);
+  }, [step, apiKey]);
 
   const handleFinish = async () => {
     setSaving(true);

@@ -21,6 +21,9 @@ export default function CoachPage() {
   const [promptType, setPromptType] = useState<string>('coach');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const messagesRef = useRef<Message[]>([]);
+
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -35,8 +38,7 @@ export default function CoachPage() {
     setMessages([]);
 
     if (greeting) {
-      // Use a timeout to let the state clear before sending
-      setTimeout(() => handleSend(greeting, type), 50);
+      handleSend(greeting, type);
     }
   };
 
@@ -49,10 +51,14 @@ export default function CoachPage() {
     setInput('');
     setIsStreaming(true);
 
-    // Save user message
-    if (sessionId) {
-      await addMessageToSession(sessionId, 'user', messageText);
+    // Save user message — create a session if none exists
+    let currentSessionId = sessionId;
+    if (!currentSessionId) {
+      const session = await createSession('coach' as any);
+      currentSessionId = session.id;
+      setSessionId(session.id);
     }
+    await addMessageToSession(currentSessionId, 'user', messageText);
 
     try {
       const apiKey = await getApiKey();
@@ -68,7 +74,7 @@ export default function CoachPage() {
         .map(e => `[${e.created.split('T')[0]}] ${e.body.substring(0, 200)}`)
         .join('\n');
 
-      const chatMessages: Message[] = messages.map(m => ({ role: m.role, content: m.content }));
+      const chatMessages: Message[] = messagesRef.current.map(m => ({ role: m.role, content: m.content }));
       const apiMessages = buildMessages(
         type as any || promptType as any,
         chatMessages,
@@ -92,8 +98,8 @@ export default function CoachPage() {
       }
 
       // Save assistant message
-      if (sessionId) {
-        await addMessageToSession(sessionId, 'assistant', assistantContent);
+      if (currentSessionId) {
+        await addMessageToSession(currentSessionId, 'assistant', assistantContent);
       }
     } catch (err: any) {
       if (err.name !== 'AbortError') {
