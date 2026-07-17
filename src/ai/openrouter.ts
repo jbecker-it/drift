@@ -1,5 +1,9 @@
 // ─── OpenRouter API Client ───────────────────────────
 
+const BASE = 'https://openrouter.ai/api/v1';
+const DRIFT_REFERER = 'https://github.com/jbecker-it/drift';
+const DRIFT_TITLE = 'Drift Journal';
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -10,7 +14,42 @@ export interface OpenRouterConfig {
   model: string;
 }
 
-const BASE = 'https://openrouter.ai/api/v1';
+export interface RequestOptions {
+  temperature?: number;
+  max_tokens?: number;
+  response_format?: { type: 'json_object' };
+}
+
+// ─── Shared builders ────────────────────────────────
+
+function buildHeaders(apiKey: string): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${apiKey}`,
+    'HTTP-Referer': DRIFT_REFERER,
+    'X-Title': DRIFT_TITLE,
+  };
+}
+
+function buildBody(
+  messages: ChatMessage[],
+  config: OpenRouterConfig,
+  options: RequestOptions = {},
+  stream = true,
+) {
+  return {
+    model: config.model,
+    messages,
+    stream,
+    temperature: options.temperature ?? 0.7,
+    max_tokens: options.max_tokens ?? 1024,
+    ...(options.response_format ? { response_format: options.response_format } : {}),
+    provider: { data_collection: 'deny' },
+    plugins: [],
+  };
+}
+
+// ─── Streaming chat completion ──────────────────────
 
 /**
  * Stream a chat completion from OpenRouter.
@@ -19,23 +58,13 @@ const BASE = 'https://openrouter.ai/api/v1';
 export async function* streamChat(
   messages: ChatMessage[],
   config: OpenRouterConfig,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options: RequestOptions = {},
 ): AsyncGenerator<string, void, unknown> {
   const res = await fetch(`${BASE}/chat/completions`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`,
-      'HTTP-Referer': window.location.origin,
-      'X-Title': 'Drift Journal',
-    },
-    body: JSON.stringify({
-      model: config.model,
-      messages,
-      stream: true,
-      temperature: 0.7,
-      max_tokens: 1024,
-    }),
+    headers: buildHeaders(config.apiKey),
+    body: JSON.stringify(buildBody(messages, config, options, true)),
     signal,
   });
 
@@ -64,7 +93,9 @@ export async function* streamChat(
       try {
         const json = JSON.parse(data);
         const delta = json.choices?.[0]?.delta?.content;
-        if (delta) yield delta;
+        if (delta) {
+          yield cleanReasoningOutput(delta);
+        }
       } catch {
         // skip malformed lines
       }
@@ -72,28 +103,21 @@ export async function* streamChat(
   }
 }
 
+// ─── Non-streaming chat completion ──────────────────
+
 /**
- * Non-streaming chat completion.
+ * Non-streaming chat completion. Used for background jobs (tagging, summaries).
  */
 export async function chatComplete(
   messages: ChatMessage[],
   config: OpenRouterConfig,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options: RequestOptions = {},
 ): Promise<string> {
   const res = await fetch(`${BASE}/chat/completions`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`,
-      'HTTP-Referer': window.location.origin,
-      'X-Title': 'Drift Journal',
-    },
-    body: JSON.stringify({
-      model: config.model,
-      messages,
-      temperature: 0.7,
-      max_tokens: 1024,
-    }),
+    headers: buildHeaders(config.apiKey),
+    body: JSON.stringify(buildBody(messages, config, options, false)),
     signal,
   });
 
@@ -104,4 +128,18 @@ export async function chatComplete(
 
   const json = await res.json();
   return json.choices?.[0]?.message?.content || '';
+}
+
+// ─── Reasoning block filter ─────────────────────────
+
+/**
+ * Strip leaked reasoning / thinking blocks from model output.
+ * Some models inject <thinking>...</thinking> or similar into content.
+ */
+export function cleanReasoningOutput(text: string): string {
+  return text
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+    .replace(/<思考>[\s\S]*?<\/思考>/gi, '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .trim();
 }
