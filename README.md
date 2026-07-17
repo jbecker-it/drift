@@ -295,6 +295,7 @@ This project is licensed under the **MIT License**.
 
 ## 📋 Recent Changes
 
+- **Word count display fix** — Entry cards now show "361 words" instead of ambiguous "361w" which was being misread as "361 weeks". Applied to JournalPage and EntriesPage; Dashboard already displayed the full word.
 - **UTC→local date fix** — Streak and mood calculations now use your local timezone instead of UTC, so daily streaks reset at midnight in your time.
 - **CoachPage stale closure fix** — Fixed double-session creation and improved unmount cleanup when switching between coach modes.
 - **Race condition fix** — `addMessageToSession` no longer races with concurrent calls.
