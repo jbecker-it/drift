@@ -25,15 +25,7 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 
 ## 📸 Screenshots
 
-| Home | Journal Entry | AI Coach |
-|------|--------------|----------|
-| ![Home](screenshots/home.png) | ![Journal Entry](screenshots/journal-entry.png) | ![AI Coach](screenshots/ai-coach.png) |
-
-| Mood Tracker | Streaks | Settings |
-|-------------|---------|----------|
-| ![Mood Tracker](screenshots/mood-tracker.png) | ![Streaks](screenshots/streaks.png) | ![Settings](screenshots/settings.png) |
-
-> 📌 *Replace the placeholder paths above with actual screenshot files. Recommended size: 1200×800px.*
+> 📸 *Screenshots coming soon. Install Drift and try it yourself — it's the best way to experience it!*
 
 ---
 
@@ -298,6 +290,17 @@ Open an issue on GitHub with:
 ## 📄 License
 
 This project is licensed under the **MIT License**.
+
+---
+
+## 📋 Recent Changes
+
+- **UTC→local date fix** — Streak and mood calculations now use your local timezone instead of UTC, so daily streaks reset at midnight in your time.
+- **CoachPage stale closure fix** — Fixed double-session creation and improved unmount cleanup when switching between coach modes.
+- **Race condition fix** — `addMessageToSession` no longer races with concurrent calls.
+- **Onboarding defaults** — New users see recommended models (Claude Sonnet 5 primary, DeepSeek V4 Flash background) out of the box.
+- **EntriesPage streaming fix** — Reflection requests now correctly pass the `REQUEST_CONFIG.reflect` parameter.
+- **SettingsPage performance** — Added `useCallback` to prevent unnecessary re-renders.
 
 ---
 
