@@ -86,6 +86,13 @@ class DriftDB extends Dexie {
 
 export const db = new DriftDB();
 
+// ─── Helpers ─────────────────────────────────────────
+
+/** Get a YYYY-MM-DD string in the user's local timezone (not UTC). */
+function localDateKey(date: Date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
 // ─── Entry helpers ───────────────────────────────────
 
 export async function saveEntry(body: string, mood?: number, tags?: string[]): Promise<JournalEntry> {
@@ -163,10 +170,9 @@ export async function addMessageToSession(
   role: 'user' | 'assistant',
   content: string
 ): Promise<void> {
-  const session = await db.sessions.get(sessionId);
-  if (!session) return;
-  session.messages.push({ role, content, timestamp: new Date().toISOString() });
-  await db.sessions.update(sessionId, { messages: session.messages });
+  await db.sessions.where('id').equals(sessionId).modify(session => {
+    session.messages.push({ role, content, timestamp: new Date().toISOString() });
+  });
 }
 
 export async function endSession(sessionId: string): Promise<void> {
@@ -176,7 +182,7 @@ export async function endSession(sessionId: string): Promise<void> {
 // ─── Mood helpers ────────────────────────────────────
 
 export async function logMood(mood: number, entryId?: string): Promise<MoodEntry> {
-  const today = new Date().toISOString().split('T')[0];
+  const today = localDateKey();
   const entry: MoodEntry = {
     id: uuid(),
     date: today,
@@ -190,10 +196,7 @@ export async function logMood(mood: number, entryId?: string): Promise<MoodEntry
 export async function getMoodHistory(days: number = 30): Promise<MoodEntry[]> {
   const since = new Date();
   since.setDate(since.getDate() - days);
-  return db.moods
-    .where('date')
-    .above(since.toISOString().split('T')[0])
-    .toArray();
+  return db.moods.where('date').above(localDateKey(since)).toArray();
 }
 
 // ─── Reward helpers ──────────────────────────────────
@@ -266,11 +269,11 @@ export async function calculateStreak(): Promise<{ current: number; longest: num
 
   if (entries.length === 0) return { current: 0, longest: 0, lastEntryDate: null };
 
-  // Get unique dates
-  const dates = [...new Set(entries.map((e: JournalEntry) => e.created.split('T')[0]))].sort().reverse();
+  // Get unique dates (local timezone, not UTC)
+  const dates = [...new Set(entries.map((e: JournalEntry) => localDateKey(new Date(e.created))))].sort().reverse();
 
-  const today = new Date().toISOString().split('T')[0];
-  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+  const today = localDateKey();
+  const yesterday = localDateKey(new Date(Date.now() - 86400000));
 
   // Current streak
   let current = 0;
@@ -282,14 +285,14 @@ export async function calculateStreak(): Promise<{ current: number; longest: num
   }
 
   for (const date of dates) {
-    const expected = checkDate.toISOString().split('T')[0];
+    const expected = localDateKey(checkDate);
     if (date === expected) {
       current++;
       checkDate.setDate(checkDate.getDate() - 1);
     } else if (date < expected) {
       // Allow one gap (forgiving streaks)
       checkDate.setDate(checkDate.getDate() - 1);
-      const expectedAfterGap = checkDate.toISOString().split('T')[0];
+      const expectedAfterGap = localDateKey(checkDate);
       if (date === expectedAfterGap) {
         current++;
         checkDate.setDate(checkDate.getDate() - 1);
