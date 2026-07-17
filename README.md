@@ -44,6 +44,17 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 
 ---
 
+## 📥 Download
+
+**Pre-built releases** — no Node.js required:
+[GitHub Releases](https://github.com/jbecker-it/drift/releases)
+
+1. Download `drift-prod.zip` from the latest release
+2. Unzip it
+3. Serve the `dist/` folder (e.g. `npx serve dist`, or deploy to any static host)
+
+---
+
 ## 🚀 Getting Started
 
 ### Prerequisites
