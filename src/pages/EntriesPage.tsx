@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { db, deleteEntry, updateEntry, type JournalEntry } from '../db';
 import { streamChat } from '../ai/openrouter';
-import { getReflectionPrompt } from '../ai/prompts';
+import { getReflectionPrompt, REQUEST_CONFIG } from '../ai/prompts';
 import { getModel, getApiKey } from '../db';
 
 const MOODS = [
@@ -80,7 +80,7 @@ export default function EntriesPage() {
       if (!apiKey) return;
       const messages = getReflectionPrompt(entry.body);
       let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model })) {
+      for await (const chunk of streamChat(messages, { apiKey, model }, undefined, REQUEST_CONFIG.reflect)) {
         result += chunk;
         setEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: result } : e));
       }
