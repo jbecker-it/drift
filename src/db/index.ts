@@ -244,10 +244,10 @@ export async function getModel(): Promise<string> {
 
 export async function getBackgroundModel(): Promise<string> {
   const val = await getSetting('openrouter_background_model');
-  if (!val || val === 'same') {
-    return getModel(); // fall back to primary model
+  if (val === 'same') {
+    return getModel(); // user explicitly chose "same as primary"
   }
-  return val;
+  return val || 'deepseek/deepseek-v4-flash'; // default: DeepSeek V4 Flash
 }
 
 export async function setBackgroundModel(model: string): Promise<void> {

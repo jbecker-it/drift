@@ -1,6 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
-import { setSetting } from '../db';
-import { fetchModels, filterModels, isFree, setFreeOnlySetting, type OpenRouterModel } from '../ai/models';
+import { useState } from 'react';
+import { setSetting, setBackgroundModel } from '../db';
 
 const PERSONALITIES = [
   { id: 'coach', label: 'Coach', desc: 'Encouraging, pushes you gently, helps you prioritize', icon: '🏆' },
@@ -12,52 +11,15 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState(0);
   const [apiKey, setApiKey] = useState('');
   const [personality, setPersonality] = useState<string>('coach');
-  const [freeOnly, setFreeOnly] = useState(false);
   const [saving, setSaving] = useState(false);
-
-  // Model fetching
-  const [allModels, setAllModels] = useState<OpenRouterModel[]>([]);
-  const [loadingModels, setLoadingModels] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('xiaomi/mimo-v2.5');
-  const [modelSearch, setModelSearch] = useState('');
-
-  const displayModels = useMemo(() => {
-    const filtered = filterModels(allModels, freeOnly);
-    if (!modelSearch) return filtered;
-    const q = modelSearch.toLowerCase();
-    return filtered.filter(m =>
-      m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
-    );
-  }, [allModels, freeOnly, modelSearch]);
-
-  const freeCount = allModels.filter(isFree).length;
-
-  // Fetch models when API key is provided
-  const fetchAndSetModels = async () => {
-    setLoadingModels(true);
-    try {
-      const models = await fetchModels();
-      setAllModels(models);
-    } catch {
-      // Silently fail — user can still type a model ID manually
-    } finally {
-      setLoadingModels(false);
-    }
-  };
-
-  useEffect(() => {
-    if (apiKey && step === 2) {
-      fetchAndSetModels();
-    }
-  }, [step, apiKey]);
 
   const handleFinish = async () => {
     setSaving(true);
     await Promise.all([
       setSetting('openrouter_api_key', apiKey),
-      setSetting('openrouter_model', selectedModel),
+      setSetting('openrouter_model', 'anthropic/claude-sonnet-5'),
+      setBackgroundModel('deepseek/deepseek-v4-flash'),
       setSetting('personality', personality),
-      setFreeOnlySetting(freeOnly),
     ]);
     onComplete();
   };
@@ -65,7 +27,6 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
   return (
     <div className="min-h-screen bg-bg-primary flex items-center justify-center p-4">
       <div className="max-w-md w-full animate-fade-in">
-
         {/* Step 0: Welcome */}
         {step === 0 && (
           <div className="text-center space-y-6">
@@ -140,108 +101,46 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
           </div>
         )}
 
-        {/* Step 2: Free vs Paid + Model */}
+        {/* Step 2: Recommended defaults */}
         {step === 2 && (
-          <div className="space-y-5">
+          <div className="space-y-6">
             <div className="text-center">
-              <h2 className="text-2xl font-bold text-text-primary">Choose your model</h2>
+              <h2 className="text-2xl font-bold text-text-primary">AI models ready</h2>
               <p className="text-text-secondary mt-2">
-                Pick an AI model. Free models work great for journaling.
+                We've pre-selected the best models based on extensive testing.
               </p>
             </div>
 
-            {/* Free/Paid toggle */}
-            <div className="bg-bg-card border border-border rounded-xl p-4">
+            {/* Primary model */}
+            <div className="bg-bg-card border border-accent-green/30 rounded-xl p-5 space-y-2">
               <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-sm font-medium text-text-primary">Free models only</span>
-                  <p className="text-xs text-text-dim mt-0.5">
-                    {freeOnly
-                      ? `${freeCount} free models available`
-                      : `All ${allModels.length} models (including ${freeCount} free)`
-                    }
-                  </p>
-                </div>
-                <button
-                  onClick={() => { setFreeOnly(!freeOnly); setModelSearch(''); }}
-                  className={`relative w-12 h-6 rounded-full transition-colors flex-shrink-0 ${
-                    freeOnly ? 'bg-accent-green' : 'bg-bg-hover'
-                  }`}
-                >
-                  <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200 ${
-                    freeOnly ? 'translate-x-6' : 'translate-x-0'
-                  }`} />
-                </button>
+                <span className="text-xs font-medium text-accent-green uppercase tracking-wide">Primary model</span>
+                <span className="px-2 py-0.5 text-[10px] font-medium bg-accent-green-dim text-accent-green rounded">Recommended</span>
               </div>
+              <div className="text-sm font-medium text-text-primary">Claude Sonnet 5</div>
+              <div className="text-xs text-text-dim">anthropic/claude-sonnet-5</div>
+              <p className="text-xs text-text-muted leading-relaxed">
+                Used for AI Coach chat, reflections, and topic suggestions.
+                Won a blind five-model comparison for warmth, brevity, and epistemic honesty.
+              </p>
             </div>
 
-            {/* Search */}
-            <div className="relative">
-              <input
-                type="text"
-                value={modelSearch}
-                onChange={(e) => setModelSearch(e.target.value)}
-                placeholder="Search models..."
-                className="w-full px-4 py-2.5 bg-bg-input border border-border rounded-xl
-                           text-text-primary placeholder:text-text-dim text-sm
-                           focus:border-accent-green focus:ring-1 focus:ring-accent-green
-                           transition-colors"
-              />
-              {modelSearch && (
-                <button
-                  onClick={() => setModelSearch('')}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim hover:text-text-secondary"
-                >
-                  ✕
-                </button>
-              )}
+            {/* Background model */}
+            <div className="bg-bg-card border border-border rounded-xl p-5 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-accent-blue uppercase tracking-wide">Background model</span>
+                <span className="px-2 py-0.5 text-[10px] font-medium bg-accent-blue/10 text-accent-blue rounded">Recommended</span>
+              </div>
+              <div className="text-sm font-medium text-text-primary">DeepSeek V4 Flash</div>
+              <div className="text-xs text-text-dim">deepseek/deepseek-v4-flash</div>
+              <p className="text-xs text-text-muted leading-relaxed">
+                Used for entry tagging and weekly summaries. Runs automatically on save.
+              </p>
             </div>
 
-            {/* Model list */}
-            <div className="max-h-[300px] overflow-y-auto space-y-1 border border-border rounded-xl divide-y divide-border">
-              {loadingModels ? (
-                <div className="p-4 text-center text-text-dim text-sm animate-pulse-gentle">
-                  Fetching models...
-                </div>
-              ) : displayModels.length === 0 ? (
-                <div className="p-4 text-center text-text-dim text-sm">
-                  No models found
-                </div>
-              ) : (
-                displayModels.map(m => (
-                  <button
-                    key={m.id}
-                    onClick={() => setSelectedModel(m.id)}
-                    className={`w-full text-left px-4 py-3 transition-colors ${
-                      selectedModel === m.id
-                        ? 'bg-accent-green-dim'
-                        : 'hover:bg-bg-hover'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className={`text-sm font-medium truncate ${
-                            selectedModel === m.id ? 'text-accent-green' : 'text-text-primary'
-                          }`}>
-                            {m.name}
-                          </span>
-                          {isFree(m) && (
-                            <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium bg-accent-green-dim text-accent-green rounded">
-                              FREE
-                            </span>
-                          )}
-                        </div>
-                        <span className="text-xs text-text-dim truncate block">{m.id}</span>
-                      </div>
-                      {selectedModel === m.id && (
-                        <span className="shrink-0 text-accent-green">✓</span>
-                      )}
-                    </div>
-                  </button>
-                ))
-              )}
-            </div>
+            <p className="text-xs text-text-dim text-center">
+              You can change both models anytime in Settings.
+            </p>
 
             <div className="flex gap-3">
               <button
