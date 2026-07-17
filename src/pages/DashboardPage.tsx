@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getRecentEntries, calculateStreak, getMoodHistory, getAllRewards, type JournalEntry, type MoodEntry, type Reward } from '../db';
-import { streamChat } from '../ai/openrouter';
-import { getModel, getApiKey } from '../db';
+import { generateWeeklySummary } from '../ai/tagging';
 
 export default function DashboardPage() {
   const [entries, setEntries] = useState<JournalEntry[]>([]);
@@ -30,36 +29,10 @@ export default function DashboardPage() {
 
   const generateWeeklyInsight = async () => {
     setLoadingInsight(true);
+    setWeeklyInsight('');
     try {
-      const apiKey = await getApiKey();
-      const model = await getModel();
-      if (!apiKey || entries.length === 0) return;
-
-      const weekEntries = entries.filter(e => {
-        const d = new Date(e.created);
-        const now = new Date();
-        return (now.getTime() - d.getTime()) < 7 * 86400000;
-      });
-
-      if (weekEntries.length === 0) {
-        setWeeklyInsight('No entries this week yet. Start journaling to get insights!');
-        return;
-      }
-
-      const context = weekEntries
-        .map(e => `[${e.created.split('T')[0]}] ${e.body.substring(0, 300)}`)
-        .join('\n\n');
-
-      const messages = [
-        { role: 'system' as const, content: 'You are an ADHD journal analyst. Provide a brief weekly insight (3-4 sentences) based on the user\'s journal entries. Focus on themes, emotional patterns, and one actionable observation. Be warm and direct.' },
-        { role: 'user' as const, content: `Here are my entries from this week:\n\n${context}` },
-      ];
-
-      let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model })) {
-        result += chunk;
-        setWeeklyInsight(result);
-      }
+      const result = await generateWeeklySummary();
+      setWeeklyInsight(result);
     } catch {
       setWeeklyInsight('Could not generate insight. Try again later.');
     } finally {
@@ -124,10 +97,10 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Weekly insight */}
+      {/* Weekly summary */}
       <div className="bg-bg-card border border-border rounded-xl p-5">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-medium text-accent-purple">✨ Weekly insight</h3>
+          <h3 className="text-sm font-medium text-accent-purple">📊 Weekly summary</h3>
           <button
             onClick={generateWeeklyInsight}
             disabled={loadingInsight}
@@ -142,8 +115,8 @@ export default function DashboardPage() {
         ) : (
           <p className="text-sm text-text-dim italic">
             {thisWeek > 0
-              ? `You've written ${thisWeek} ${thisWeek === 1 ? 'entry' : 'entries'} this week. Click "Generate" for an AI insight.`
-              : 'No entries this week yet. Start journaling to unlock insights!'
+              ? `You've written ${thisWeek} ${thisWeek === 1 ? 'entry' : 'entries'} this week. Click "Generate" for a weekly summary.`
+              : 'No entries this week yet. Start journaling to unlock summaries!'
             }
           </p>
         )}
