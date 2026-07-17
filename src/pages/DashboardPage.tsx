@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { getRecentEntries, calculateStreak, getMoodHistory, getAllRewards, type JournalEntry, type MoodEntry, type Reward } from '../db';
 import { generateWeeklySummary } from '../ai/tagging';
 
@@ -10,11 +10,7 @@ export default function DashboardPage() {
   const [weeklyInsight, setWeeklyInsight] = useState('');
   const [loadingInsight, setLoadingInsight] = useState(false);
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     const [recentEntries, currentStreak, moodHistory, allRewards] = await Promise.all([
       getRecentEntries(20),
       calculateStreak(),
@@ -25,7 +21,11 @@ export default function DashboardPage() {
     setStreak(currentStreak);
     setMoods(moodHistory);
     setRewards(allRewards);
-  };
+  }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const generateWeeklyInsight = async () => {
     setLoadingInsight(true);

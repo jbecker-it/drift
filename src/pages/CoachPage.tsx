@@ -26,6 +26,13 @@ export default function CoachPage() {
 
   useEffect(() => { messagesRef.current = messages; }, [messages]);
 
+  // Cleanup: abort any in-flight stream when component unmounts
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
+
   // Load personality from settings
   useEffect(() => {
     getPersonality().then(p => setPersonality(p as Personality || 'coach'));
@@ -49,11 +56,11 @@ export default function CoachPage() {
     setMessages([]);
 
     if (greeting) {
-      handleSend(greeting, mode);
+      handleSend(greeting, mode, session.id);
     }
   };
 
-  const handleSend = async (text?: string, mode?: CoachMode) => {
+  const handleSend = async (text?: string, mode?: CoachMode, sessionIdOverride?: string) => {
     const messageText = text || input;
     if (!messageText.trim() || isStreaming) return;
 
@@ -62,8 +69,8 @@ export default function CoachPage() {
     setInput('');
     setIsStreaming(true);
 
-    // Save user message — create a session if none exists
-    let currentSessionId = sessionId;
+    // Save user message — use override if provided (avoids stale closure), else create session
+    let currentSessionId = sessionIdOverride || sessionId;
     if (!currentSessionId) {
       const m = mode || currentMode;
       const sessionType = m === 'brain_dump' ? 'dump'

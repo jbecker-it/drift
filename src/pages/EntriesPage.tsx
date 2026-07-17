@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { db, deleteEntry, updateEntry, type JournalEntry } from '../db';
 import { streamChat } from '../ai/openrouter';
 import { getReflectionPrompt, REQUEST_CONFIG } from '../ai/prompts';
@@ -22,13 +22,22 @@ export default function EntriesPage() {
   const [editingEntry, setEditingEntry] = useState<JournalEntry | null>(null);
   const [editBody, setEditBody] = useState('');
   const [editMood, setEditMood] = useState<number | undefined>();
+  const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => { loadAll(); }, []);
+  // Cleanup: abort any in-flight streams when component unmounts
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
 
-  const loadAll = async () => {
+  const loadAll = useCallback(async () => {
     const all = await db.entries.orderBy('created').reverse().toArray();
     setEntries(all);
-  };
+  }, []);
+
+  // Load entries on mount
+  useEffect(() => { loadAll(); }, [loadAll]);
 
   const filtered = useMemo(() => {
     const now = new Date();
@@ -78,9 +87,14 @@ export default function EntriesPage() {
       const apiKey = await getApiKey();
       const model = await getModel();
       if (!apiKey) return;
+
+      // Abort any previous in-flight stream
+      abortRef.current?.abort();
+      abortRef.current = new AbortController();
+
       const messages = getReflectionPrompt(entry.body);
       let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model }, undefined, REQUEST_CONFIG.reflect)) {
+      for await (const chunk of streamChat(messages, { apiKey, model }, abortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
         setEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: result } : e));
       }

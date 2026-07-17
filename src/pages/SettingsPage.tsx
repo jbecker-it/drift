@@ -33,7 +33,7 @@ export default function SettingsPage() {
 
   useEffect(() => { loadData(); }, []);
 
-  const loadData = async () => {
+  async function loadData() {
     const [key, mod, pers, free, bgMod] = await Promise.all([
       getApiKey(), getModel(), getPersonality(), getFreeOnlySetting(), getBackgroundModel(),
     ]);
@@ -60,7 +60,7 @@ export default function SettingsPage() {
     } finally {
       setLoadingModels(false);
     }
-  };
+  }
 
   const displayModels = useMemo(() => {
     const filtered = filterModels(allModels, freeOnly);

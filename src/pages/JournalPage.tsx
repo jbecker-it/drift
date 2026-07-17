@@ -37,6 +37,14 @@ export default function JournalPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftIdRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Cleanup: abort any in-flight streams when component unmounts
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
 
   const loadEntries = useCallback(async () => {
     const entries = await getRecentEntries(10);
@@ -77,9 +85,13 @@ export default function JournalPage() {
       const model = await getModel();
       if (!apiKey) { setReflection('Set your API key in Settings first.'); return; }
 
+      // Abort any previous in-flight stream
+      abortRef.current?.abort();
+      abortRef.current = new AbortController();
+
       const messages = getReflectionPrompt(entryBody);
       let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model }, undefined, REQUEST_CONFIG.reflect)) {
+      for await (const chunk of streamChat(messages, { apiKey, model }, abortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
         setReflection(result);
       }
@@ -167,9 +179,14 @@ export default function JournalPage() {
       const apiKey = await getApiKey();
       const model = await getModel();
       if (!apiKey) { setReflection('Set your API key in Settings.'); return; }
+
+      // Abort any previous in-flight stream
+      abortRef.current?.abort();
+      abortRef.current = new AbortController();
+
       const messages = getReflectionPrompt(body);
       let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model }, undefined, REQUEST_CONFIG.reflect)) {
+      for await (const chunk of streamChat(messages, { apiKey, model }, abortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
         setReflection(result);
       }
@@ -205,9 +222,14 @@ export default function JournalPage() {
       const apiKey = await getApiKey();
       const model = await getModel();
       if (!apiKey) return;
+
+      // Abort any previous in-flight stream
+      abortRef.current?.abort();
+      abortRef.current = new AbortController();
+
       const messages = getReflectionPrompt(entry.body);
       let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model }, undefined, REQUEST_CONFIG.reflect)) {
+      for await (const chunk of streamChat(messages, { apiKey, model }, abortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
         setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: result } : e));
       }
@@ -226,9 +248,14 @@ export default function JournalPage() {
       const model = await getModel();
       if (!apiKey) { setSuggestions(['Set your API key in Settings to get topic suggestions.']); return; }
       const recentContext = recentEntries.map(e => `[${e.created.split('T')[0]}] ${e.body.substring(0, 200)}`).join('\n');
+
+      // Abort any previous in-flight stream
+      abortRef.current?.abort();
+      abortRef.current = new AbortController();
+
       const messages = buildMessages('topic', [], 'Suggest what I should write about today.', recentContext || undefined);
       let response = '';
-      for await (const chunk of streamChat(messages, { apiKey, model }, undefined, REQUEST_CONFIG.topic_suggest)) { response += chunk; }
+      for await (const chunk of streamChat(messages, { apiKey, model }, abortRef.current.signal, REQUEST_CONFIG.topic_suggest)) { response += chunk; }
       const lines = response.split('\n').filter(l => l.trim());
       const parsed = lines.map(l => l.replace(/^[-•*\d.]+\s*/, '').trim()).filter(Boolean);
       setSuggestions(parsed.length > 0 ? parsed : [response]);
