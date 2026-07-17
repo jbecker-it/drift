@@ -1,16 +1,16 @@
 import { useState, useEffect, useRef } from 'react';
-import { createSession, addMessageToSession, endSession, getRecentEntries } from '../db';
+import { createSession, addMessageToSession, endSession, getRecentEntries, getPersonality } from '../db';
 import { streamChat } from '../ai/openrouter';
-import { buildMessages } from '../ai/prompts';
+import { buildCoachMessages, REQUEST_CONFIG, type CoachMode, type Personality } from '../ai/prompts';
 import { getModel, getApiKey } from '../db';
 
 type Message = { role: 'user' | 'assistant'; content: string };
 
-const QUICK_STARTS = [
-  { label: '🌊 Brain dump', type: 'dump' as const, prompt: 'I need to get some thoughts out...' },
-  { label: '🌅 Morning check-in', type: 'morning' as const, prompt: "I'm ready to start my day." },
-  { label: '🌙 Evening wind-down', type: 'evening' as const, prompt: "Let me process today." },
-  { label: '💬 Just talk', type: 'coach' as const, prompt: '' },
+const QUICK_STARTS: { label: string; mode: CoachMode; prompt: string; desc: string }[] = [
+  { label: '🌊 Brain dump', mode: 'brain_dump', prompt: 'I need to get some thoughts out...', desc: 'Get it all out, no filter' },
+  { label: '🌅 Morning check-in', mode: 'morning_checkin', prompt: "I'm ready to start my day.", desc: 'Set your intention for the day' },
+  { label: '🌙 Evening wind-down', mode: 'evening_winddown', prompt: "Let me process today.", desc: 'Process what happened' },
+  { label: '💬 Just talk', mode: 'just_talk', prompt: '', desc: 'Open conversation' },
 ];
 
 export default function CoachPage() {
@@ -18,12 +18,18 @@ export default function CoachPage() {
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [promptType, setPromptType] = useState<string>('coach');
+  const [currentMode, setCurrentMode] = useState<CoachMode>('just_talk');
+  const [personality, setPersonality] = useState<Personality>('coach');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<Message[]>([]);
 
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  // Load personality from settings
+  useEffect(() => {
+    getPersonality().then(p => setPersonality(p as Personality || 'coach'));
+  }, []);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -31,18 +37,23 @@ export default function CoachPage() {
 
   useEffect(scrollToBottom, [messages]);
 
-  const startSession = async (type: string, greeting?: string) => {
-    const session = await createSession(type as any);
+  const startSession = async (mode: CoachMode, greeting?: string) => {
+    // Map new mode names to the existing ChatSession promptType union
+    const sessionType = mode === 'brain_dump' ? 'dump'
+      : mode === 'morning_checkin' ? 'morning'
+      : mode === 'evening_winddown' ? 'evening'
+      : 'coach';
+    const session = await createSession(sessionType as any);
     setSessionId(session.id);
-    setPromptType(type);
+    setCurrentMode(mode);
     setMessages([]);
 
     if (greeting) {
-      handleSend(greeting, type);
+      handleSend(greeting, mode);
     }
   };
 
-  const handleSend = async (text?: string, type?: string) => {
+  const handleSend = async (text?: string, mode?: CoachMode) => {
     const messageText = text || input;
     if (!messageText.trim() || isStreaming) return;
 
@@ -54,7 +65,12 @@ export default function CoachPage() {
     // Save user message — create a session if none exists
     let currentSessionId = sessionId;
     if (!currentSessionId) {
-      const session = await createSession('coach' as any);
+      const m = mode || currentMode;
+      const sessionType = m === 'brain_dump' ? 'dump'
+        : m === 'morning_checkin' ? 'morning'
+        : m === 'evening_winddown' ? 'evening'
+        : 'coach';
+      const session = await createSession(sessionType as any);
       currentSessionId = session.id;
       setSessionId(session.id);
     }
@@ -75,11 +91,12 @@ export default function CoachPage() {
         .join('\n');
 
       const chatMessages: Message[] = messagesRef.current.map(m => ({ role: m.role, content: m.content }));
-      const apiMessages = buildMessages(
-        type as any || promptType as any,
+      const apiMessages = buildCoachMessages(
+        mode || currentMode,
+        personality,
         chatMessages,
         messageText,
-        recentContext || undefined
+        recentContext || undefined,
       );
 
       let assistantContent = '';
@@ -88,7 +105,12 @@ export default function CoachPage() {
 
       abortRef.current = new AbortController();
 
-      for await (const chunk of streamChat(apiMessages, { apiKey, model }, abortRef.current.signal)) {
+      for await (const chunk of streamChat(
+        apiMessages,
+        { apiKey, model },
+        abortRef.current.signal,
+        REQUEST_CONFIG.coach_chat,
+      )) {
         assistantContent += chunk;
         setMessages(prev => {
           const updated = [...prev];
@@ -128,7 +150,7 @@ export default function CoachPage() {
       await endSession(sessionId);
       setSessionId(null);
       setMessages([]);
-      setPromptType('coach');
+      setCurrentMode('just_talk');
     }
   };
 
@@ -141,7 +163,7 @@ export default function CoachPage() {
           <p className="text-sm text-text-muted mt-1">
             {messages.length === 0
               ? 'Choose a mode or just start talking'
-              : `${messages.length} messages · ${promptType} mode`
+              : `${messages.length} messages · ${currentMode.replace('_', ' ')} mode`
             }
           </p>
         </div>
@@ -162,18 +184,13 @@ export default function CoachPage() {
         <div className="grid grid-cols-2 gap-3 mb-6">
           {QUICK_STARTS.map(qs => (
             <button
-              key={qs.type}
-              onClick={() => startSession(qs.type, qs.prompt)}
+              key={qs.mode}
+              onClick={() => startSession(qs.mode, qs.prompt)}
               className="p-4 bg-bg-card border border-border rounded-xl text-left
                          hover:border-accent-green hover:bg-bg-hover transition-all"
             >
               <span className="text-lg">{qs.label}</span>
-              <p className="text-xs text-text-dim mt-1">
-                {qs.type === 'dump' && 'Get it all out, no filter'}
-                {qs.type === 'morning' && 'Set your intention for the day'}
-                {qs.type === 'evening' && 'Process what happened'}
-                {qs.type === 'coach' && 'Open conversation'}
-              </p>
+              <p className="text-xs text-text-dim mt-1">{qs.desc}</p>
             </button>
           ))}
         </div>

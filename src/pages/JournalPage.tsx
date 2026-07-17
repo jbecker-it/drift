@@ -4,7 +4,8 @@ import {
   type JournalEntry,
 } from '../db';
 import { streamChat } from '../ai/openrouter';
-import { getReflectionPrompt, buildMessages } from '../ai/prompts';
+import { getReflectionPrompt, buildMessages, REQUEST_CONFIG } from '../ai/prompts';
+import { tagEntry } from '../ai/tagging';
 import { getModel, getApiKey } from '../db';
 
 const MOODS = [
@@ -78,7 +79,7 @@ export default function JournalPage() {
 
       const messages = getReflectionPrompt(entryBody);
       let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model })) {
+      for await (const chunk of streamChat(messages, { apiKey, model }, undefined, REQUEST_CONFIG.reflect)) {
         result += chunk;
         setReflection(result);
       }
@@ -116,6 +117,9 @@ export default function JournalPage() {
           await deleteEntry(draftIdRef.current);
           draftIdRef.current = null;
         }
+
+        // Fire-and-forget: auto-tag the entry in the background
+        tagEntry({ id: entry.id, body, created: entry.created, isDraft: false, wordCount: entry.wordCount });
       }
 
       await loadEntries();
@@ -165,7 +169,7 @@ export default function JournalPage() {
       if (!apiKey) { setReflection('Set your API key in Settings.'); return; }
       const messages = getReflectionPrompt(body);
       let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model })) {
+      for await (const chunk of streamChat(messages, { apiKey, model }, undefined, REQUEST_CONFIG.reflect)) {
         result += chunk;
         setReflection(result);
       }
@@ -203,7 +207,7 @@ export default function JournalPage() {
       if (!apiKey) return;
       const messages = getReflectionPrompt(entry.body);
       let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model })) {
+      for await (const chunk of streamChat(messages, { apiKey, model }, undefined, REQUEST_CONFIG.reflect)) {
         result += chunk;
         setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: result } : e));
       }
@@ -224,7 +228,7 @@ export default function JournalPage() {
       const recentContext = recentEntries.map(e => `[${e.created.split('T')[0]}] ${e.body.substring(0, 200)}`).join('\n');
       const messages = buildMessages('topic', [], 'Suggest what I should write about today.', recentContext || undefined);
       let response = '';
-      for await (const chunk of streamChat(messages, { apiKey, model })) { response += chunk; }
+      for await (const chunk of streamChat(messages, { apiKey, model }, undefined, REQUEST_CONFIG.topic_suggest)) { response += chunk; }
       const lines = response.split('\n').filter(l => l.trim());
       const parsed = lines.map(l => l.replace(/^[-•*\d.]+\s*/, '').trim()).filter(Boolean);
       setSuggestions(parsed.length > 0 ? parsed : [response]);

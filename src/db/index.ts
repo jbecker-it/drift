@@ -15,6 +15,21 @@ export interface JournalEntry {
   wordCount: number;
 }
 
+export interface EntryTags {
+  id: string;
+  entryId: string;
+  topics: string[];
+  mentions: {
+    sleep_hours: number | null;
+    mood_words: string[];
+    tasks_open: string[];
+    tasks_done: string[];
+    people: string[];
+  };
+  one_line_summary: string;
+  taggedAt: string;
+}
+
 export interface ChatSession {
   id: string;
   started: string;
@@ -48,6 +63,7 @@ export interface AppSettings {
 
 class DriftDB extends Dexie {
   entries!: Table<JournalEntry>;
+  entryTags!: Table<EntryTags>;
   sessions!: Table<ChatSession>;
   rewards!: Table<Reward>;
   moods!: Table<MoodEntry>;
@@ -61,6 +77,9 @@ class DriftDB extends Dexie {
       rewards: 'id, type, earned',
       moods: 'id, date, entryId',
       settings: 'key',
+    });
+    this.version(2).stores({
+      entryTags: 'id, entryId, taggedAt',
     });
   }
 }
@@ -313,6 +332,7 @@ export async function calculateStreak(): Promise<{ current: number; longest: num
 export async function exportAllData(): Promise<string> {
   const data = {
     entries: await db.entries.toArray(),
+    entryTags: await db.entryTags.toArray(),
     sessions: await db.sessions.toArray(),
     rewards: await db.rewards.toArray(),
     moods: await db.moods.toArray(),
@@ -323,8 +343,32 @@ export async function exportAllData(): Promise<string> {
 
 export async function clearAllData(): Promise<void> {
   await db.entries.clear();
+  await db.entryTags.clear();
   await db.sessions.clear();
   await db.rewards.clear();
   await db.moods.clear();
   await db.settings.clear();
+}
+
+// ─── Entry tags helpers ──────────────────────────────
+
+export async function saveEntryTags(tags: Omit<EntryTags, 'id'>): Promise<EntryTags> {
+  const record: EntryTags = { ...tags, id: uuid() };
+  await db.entryTags.put(record);
+  return record;
+}
+
+export async function getTagsForEntry(entryId: string): Promise<EntryTags | null> {
+  return (await db.entryTags.where('entryId').equals(entryId).first()) ?? null;
+}
+
+export async function getEntrySummaries(limit: number = 14): Promise<string[]> {
+  const tags = await db.entryTags
+    .orderBy('taggedAt')
+    .reverse()
+    .limit(limit)
+    .toArray();
+  return tags
+    .filter(t => t.one_line_summary)
+    .map(t => `[${t.taggedAt.split('T')[0]}] ${t.one_line_summary}`);
 }
