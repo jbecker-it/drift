@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
   getApiKey, getModel, getPersonality, setSetting,
+  getBackgroundModel,
   exportAllData, clearAllData,
 } from '../db';
 import {
@@ -16,7 +17,9 @@ const PERSONALITIES = [
 
 export default function SettingsPage() {
   const [apiKey, setApiKey] = useState('');
-  const [model, setModel] = useState('xiaomi/mimo-v2.5');
+  const [model, setModel] = useState('anthropic/claude-sonnet-5');
+  const [bgModel, setBgModel] = useState('deepseek/deepseek-v4-flash');
+  const [bgModelSame, setBgModelSame] = useState(false);
   const [personality, setPersonality] = useState('coach');
   const [freeOnly, setFreeOnly] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -31,13 +34,21 @@ export default function SettingsPage() {
   useEffect(() => { loadData(); }, []);
 
   const loadData = async () => {
-    const [key, mod, pers, free] = await Promise.all([
-      getApiKey(), getModel(), getPersonality(), getFreeOnlySetting(),
+    const [key, mod, pers, free, bgMod] = await Promise.all([
+      getApiKey(), getModel(), getPersonality(), getFreeOnlySetting(), getBackgroundModel(),
     ]);
     if (key) setApiKey(key);
     setModel(mod);
     setPersonality(pers);
     setFreeOnly(free);
+    // Background model
+    const primaryModel = mod;
+    if (bgMod === primaryModel || bgMod === 'same') {
+      setBgModelSame(true);
+      setBgModel(primaryModel);
+    } else {
+      setBgModel(bgMod);
+    }
 
     // Load models
     setLoadingModels(true);
@@ -86,6 +97,7 @@ export default function SettingsPage() {
     await Promise.all([
       setSetting('openrouter_api_key', apiKey),
       setSetting('openrouter_model', model),
+      setSetting('openrouter_background_model', bgModelSame ? 'same' : bgModel),
       setSetting('personality', personality),
     ]);
     setSaved(true);
@@ -268,6 +280,46 @@ export default function SettingsPage() {
           <p className="text-xs text-text-dim text-center">
             Showing {displayModels.length} of {allModels.length} models
           </p>
+        )}
+      </div>
+
+      {/* Background Model */}
+      <div className="bg-bg-card border border-border rounded-xl p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium text-text-secondary">Background Model</h3>
+            <p className="text-xs text-text-dim mt-0.5">
+              Used for entry tagging and summaries (runs locally on save)
+            </p>
+          </div>
+          <button
+            onClick={() => setBgModelSame(!bgModelSame)}
+            className={`relative w-12 h-6 rounded-full transition-colors flex-shrink-0 ${
+              bgModelSame ? 'bg-accent-green' : 'bg-bg-hover'
+            }`}
+          >
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200 ${
+              bgModelSame ? 'translate-x-6' : 'translate-x-0'
+            }`} />
+          </button>
+        </div>
+        <p className="text-xs text-text-dim">
+          {bgModelSame ? 'Same as primary model' : 'Separate model for background tasks'}
+        </p>
+
+        {!bgModelSame && (
+          <div className="relative">
+            <input
+              type="text"
+              value={bgModel}
+              onChange={(e) => setBgModel(e.target.value)}
+              placeholder="deepseek/deepseek-v4-flash"
+              className="w-full px-4 py-2.5 bg-bg-input border border-border rounded-xl
+                         text-text-primary placeholder:text-text-dim text-sm
+                         focus:border-accent-green focus:ring-1 focus:ring-accent-green
+                         transition-colors"
+            />
+          </div>
         )}
       </div>
 

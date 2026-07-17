@@ -219,7 +219,20 @@ export async function getApiKey(): Promise<string | null> {
 }
 
 export async function getModel(): Promise<string> {
-  return (await getSetting('openrouter_model')) || 'xiaomi/mimo-v2.5';
+  // Default per handoff doc: Claude Sonnet 5 won the five-model blind comparison
+  return (await getSetting('openrouter_model')) || 'anthropic/claude-sonnet-5';
+}
+
+export async function getBackgroundModel(): Promise<string> {
+  const val = await getSetting('openrouter_background_model');
+  if (!val || val === 'same') {
+    return getModel(); // fall back to primary model
+  }
+  return val;
+}
+
+export async function setBackgroundModel(model: string): Promise<void> {
+  await setSetting('openrouter_background_model', model);
 }
 
 export async function getPersonality(): Promise<string> {
