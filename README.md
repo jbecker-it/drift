@@ -10,12 +10,14 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 
 - 📝 **Journal Entries with Auto-Save Drafts** — Write freely without worrying about losing progress. Drafts are saved automatically as you type.
 - 🤖 **AI Reflections** — Get personalized reflections on your journal entries powered by OpenRouter AI models.
+- 🏷️ **Auto-Tagging** — Every entry is automatically tagged with topics, mood words, tasks, and people mentioned — powering smarter suggestions and summaries.
 - 😊 **Mood Tracking** — Log your mood alongside entries to visualize emotional patterns over time.
 - 🔥 **Streak System** — Build consistency with a streak tracker that encourages daily journaling.
 - 💬 **AI Coach Chat** — Chat with one of three AI coach personalities: **Coach**, **Listener**, or **Challenger** — each with a unique approach to helping you reflect.
 - 💡 **Topic Suggestions** — Never stare at a blank page again. AI-generated topic prompts tailored to your journaling history.
-- 📊 **Data Export** — Export your journal data in JSON format for backup or migration.
-- 📱 **Mobile-First Responsive Design** — Works beautifully on phones, tablets, and desktops.
+- 📊 **Weekly Summary** — Get a brief overview of your week's themes and patterns, generated from your entry summaries.
+- 📱 **PWA Installable** — Install Drift on your phone or desktop for a native app experience.
+- 📦 **Data Export** — Export your journal data in JSON format for backup or migration.
 - 🌙 **Dark Theme with Accessible Colors** — A carefully designed dark UI with WCAG-compliant contrast ratios.
 - 🔒 **100% Local-First** — No servers, no accounts, no cloud storage. Your data lives on your device.
 
@@ -39,7 +41,7 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 
 | Layer | Technology |
 |-------|-----------|
-| **Framework** | React 18+ |
+| **Framework** | React 19+ |
 | **Language** | TypeScript |
 | **Build Tool** | Vite |
 | **Styling** | Tailwind CSS |
@@ -204,9 +206,22 @@ Drift uses [OpenRouter](https://openrouter.ai/) for AI features. You need to pro
 
 ### Model Selection
 
-You can choose from hundreds of AI models for reflections and coaching — including many **free models**. The onboarding wizard fetches the full model list from OpenRouter and lets you filter by free/paid.
+Drift ships with two AI model slots, both configurable in Settings:
 
-Set your preferred model in the **Settings** page at any time.
+| Slot | Default Model | Purpose | Parameters |
+|------|--------------|---------|------------|
+| **Primary** | `anthropic/claude-sonnet-5` | AI Coach chat, reflections, topic suggestions | temp 0.7, max 1000 tokens |
+| **Background** | `deepseek/deepseek-v4-flash` | Entry tagging, weekly summaries | temp 0.2, max 600 tokens |
+
+The defaults were chosen via a blind five-model comparison test (Claude Sonnet 5, Grok 4.3, Kimi K2.6, DeepSeek V4 Flash, Gemini 3.5 Flash) scored on warmth, brevity, format obedience, epistemic honesty, and hallucination resistance. Claude Sonnet 5 won across all scenarios; Gemini 3.5 Flash placed last despite the highest benchmark scores — it fabricated a weekday calendar from dates alone.
+
+You can override both models in **Settings**. Per-function parameters (temperature, max tokens) are baked into the app design and not user-configurable.
+
+### Entry Tagging & Weekly Summary
+
+When you save an entry, Drift automatically extracts structured data (topics, mood words, tasks, people) using the background model. This data powers topic suggestions and the weekly summary without re-sending your raw entry text.
+
+The **Weekly summary** (available on the Dashboard) aggregates your recent entry summaries into a brief overview. Pattern claims always cite the entry dates that support them — Drift never infers data it doesn't have.
 
 ### AI Coach Personalities
 
@@ -222,14 +237,15 @@ Drift offers three AI coach personalities, each with a distinct communication st
 
 ## 🔐 Data Privacy
 
-> **Your data never leaves your device.**
+> **Your data stays on your device.**
 
 Drift is built on a **local-first** architecture:
 
-- **All journal entries, mood logs, sessions, and streak data** are stored in your browser's IndexedDB via Dexie.js.
+- **All journal entries, mood logs, sessions, streak data, and AI-generated tags** are stored in your browser's IndexedDB via Dexie.js.
 - **No data is sent to any server** — not even to us.
 - **No user accounts, no tracking, no analytics.**
-- **AI features** send only the current entry text to OpenRouter for processing. Your full journal history is never transmitted.
+- **AI features** send your current entry text to OpenRouter for processing. Topic Suggestions and Weekly Summary send locally-generated summaries of your recent entries (not raw entry text). Your full journal history is never transmitted.
+- Every OpenRouter request includes `provider: { data_collection: "deny" }` to ensure your data is not used for model training.
 - **Data export** lets you download everything as JSON for backup or migration.
 
 You are in full control of your data at all times.
