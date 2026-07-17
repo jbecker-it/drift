@@ -164,7 +164,7 @@ export default function EntriesPage() {
                       })}
                     </span>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs text-text-dim">{entry.wordCount}w</span>
+                      <span className="text-xs text-text-dim">{entry.wordCount} words</span>
                       {entry.mood && <span className="text-sm">{MOODS[entry.mood - 1]?.emoji}</span>}
                       {!isEditing && <span className="text-text-dim text-xs">{isExpanded ? '▾' : '▸'}</span>}
                     </div>
