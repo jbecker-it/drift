@@ -223,12 +223,32 @@ Major bug fix pass based on a 4-round code review by GPT-5.6-Terra. 18 bugs fixe
 
 5. **Service worker precache** — The PWA now properly precaches all build assets (JS, CSS, fonts). First load after update may re-download all assets. Subsequent loads will be fully offline-capable.
 
-**What to check after upgrading:**
+**What to check after upgrading (v0.1.x → v0.2.0):**
 - Streak counter may show different numbers (fixed forgiveness logic — was counting every-other-day indefinitely as a streak)
 - Dashboard total entries/words should now be accurate (was capped at 20)
 - Existing drafts will be restored to the journal editor on first load
 - AI streaming responses should display with proper spacing (was previously corrupted)
 
+---
+
+### v0.2.1 — PWA Stale Cache Fix
+
+**Fixed: App stuck on "Loading Drift…" in normal browser (works in incognito)**
+
+The PWA was precaching `index.html` and serving it via Workbox's `NavigationRoute`. After deploying a new build, the old service worker kept serving the stale `index.html` which referenced deleted JS chunk hashes. The app JS failed to load silently, and `getApiKey()` hung forever — leaving users stuck on the loading screen.
+
+**Changes:**
+- **`vite.config.ts`** — Removed `html` from `globPatterns` (no longer precaches `index.html`). Disabled `navigateFallback`. Added `NetworkFirst` runtime caching for all navigation requests. The browser always tries to fetch `index.html` from the network first, falling back to cache only when offline.
+- **`src/App.tsx`** — Added 5-second timeout + `.catch()` to `getApiKey()` initialization. If the DB init hangs (e.g. corrupted IndexedDB, stale SW), the app auto-clears the service worker and all caches, then proceeds to onboarding. Users are never stuck on the loading screen again.
+
+**If you're currently stuck on "Loading Drift…":**
+1. Open Drift in **incognito mode** (works immediately)
+2. Go to **Settings** → **Export** to back up your data
+3. Then either:
+   - Hard-refresh (Ctrl+Shift+R / Cmd+Shift+R) to pick up the new SW
+   - Or: Chrome → Settings → Site settings → find Drift → Clear & reset (⚠️ wipes IndexedDB — export first!)
+
+> ⚠️ **Do NOT "Clear & reset" without exporting first** — this deletes all your journal entries stored in IndexedDB.
 ---
 
 <p align="center">

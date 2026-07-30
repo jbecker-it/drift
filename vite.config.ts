@@ -29,8 +29,17 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,svg,woff,woff2}'],
+        globPatterns: ['**/*.{js,css,svg,woff,woff2}'],
+        navigateFallback: '',
         runtimeCaching: [
+          {
+            urlPattern: ({ request }) => request.mode === 'navigate',
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'pages',
+              expiration: { maxEntries: 10 },
+            },
+          },
           {
             urlPattern: /^https:\/\/openrouter\.ai\/.*/i,
             handler: 'NetworkOnly',
@@ -54,7 +63,7 @@ export default defineConfig({
             },
           },
         ],
-        navigateFallback: 'index.html',
+
       },
     }),
   ],

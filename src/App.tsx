@@ -107,8 +107,24 @@ export default function App() {
   const [hasApiKey, setHasApiKey] = useState(false);
 
   useEffect(() => {
+    const timeout = setTimeout(() => {
+      console.warn('Drift: DB init timed out — clearing service worker cache');
+      navigator.serviceWorker?.getRegistrations?.().then(regs =>
+        regs.forEach(r => r.unregister()),
+      );
+      caches.keys().then(names => names.forEach(c => caches.delete(c)));
+      setHasApiKey(false);
+      setReady(true);
+    }, 5000);
+
     getApiKey().then(key => {
+      clearTimeout(timeout);
       setHasApiKey(!!key);
+      setReady(true);
+    }).catch(err => {
+      console.error('Drift: failed to load API key', err);
+      clearTimeout(timeout);
+      setHasApiKey(false);
       setReady(true);
     });
   }, []);
