@@ -174,6 +174,8 @@ export default function SettingsPage() {
           </div>
           <button
             onClick={handleFreeOnlyToggle}
+            aria-label="Show free models only"
+            aria-pressed={freeOnly}
             className={`relative w-12 h-6 rounded-full transition-colors flex-shrink-0 ${
               freeOnly ? 'bg-accent-green' : 'bg-bg-hover'
             }`}
@@ -219,6 +221,7 @@ export default function SettingsPage() {
           {modelSearch && (
             <button
               onClick={() => setModelSearch('')}
+              aria-label="Clear model search"
               className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim hover:text-text-secondary"
             >
               ✕
@@ -294,6 +297,8 @@ export default function SettingsPage() {
           </div>
           <button
             onClick={() => setBgModelSame(!bgModelSame)}
+            aria-label="Use primary model for background tasks"
+            aria-pressed={bgModelSame}
             className={`relative w-12 h-6 rounded-full transition-colors flex-shrink-0 ${
               bgModelSame ? 'bg-accent-green' : 'bg-bg-hover'
             }`}

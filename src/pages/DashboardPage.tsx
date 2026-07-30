@@ -20,10 +20,11 @@ export default function DashboardPage() {
       getAllRewards(),
     ]);
     // Use full entry list for accurate totals (#7)
+    const sorted = [...allEntries].sort((a, b) => b.created.localeCompare(a.created));
     setTotalEntries(allEntries.length);
     setTotalWords(allEntries.reduce((sum, e) => sum + e.wordCount, 0));
-    // Show only recent 5 for display
-    setEntries(allEntries.slice(0, 5));
+    // Show only recent 5 for display (sorted by date)
+    setEntries(sorted.slice(0, 5));
     setStreak(currentStreak);
     setMoods(moodHistory);
     setRewards(allRewards);

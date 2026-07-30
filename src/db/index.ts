@@ -159,9 +159,10 @@ export async function updateEntry(id: string, updates: Partial<JournalEntry>): P
   const old = await db.entries.get(id);
   await db.entries.update(id, updates);
 
-  // Sync mood history if mood changed
-  if (updates.mood !== undefined && old) {
-    if (updates.mood === undefined) {
+  // Sync mood history if mood property was explicitly included in the update
+  const hasMoodUpdate = Object.prototype.hasOwnProperty.call(updates, 'mood');
+  if (hasMoodUpdate && old) {
+    if (updates.mood === undefined || updates.mood === null) {
       // Mood removed — delete the mood record
       await db.moods.where('entryId').equals(id).delete();
     } else if (updates.mood !== old.mood) {
@@ -281,7 +282,7 @@ export async function logMood(mood: number, entryId?: string): Promise<MoodEntry
 export async function getMoodHistory(days: number = 30): Promise<MoodEntry[]> {
   const since = new Date();
   since.setDate(since.getDate() - days);
-  return db.moods.where('date').above(localDateKey(since)).toArray();
+  return db.moods.where('date').aboveOrEqual(localDateKey(since)).toArray();
 }
 
 // ─── Reward helpers ──────────────────────────────────
@@ -291,19 +292,22 @@ export async function awardReward(
   label: string,
   description: string
 ): Promise<Reward | null> {
-  // Check if already awarded (for unique achievements)
-  const existing = await db.rewards.where('type').equals(type).first();
-  if (existing) return null;
+  // Use a transaction for atomic check-and-insert
+  return db.transaction('rw', db.rewards, async () => {
+    // Check both by type (new format) and scan for legacy UUID-keyed entries
+    const existing = await db.rewards.where('type').equals(type).first();
+    if (existing) return null;
 
-  const reward: Reward = {
-    id: uuid(),
-    type,
-    earned: new Date().toISOString(),
-    label,
-    description,
-  };
-  await db.rewards.add(reward);
-  return reward;
+    const reward: Reward = {
+      id: type, // type IS the primary key — unique by definition
+      type,
+      earned: new Date().toISOString(),
+      label,
+      description,
+    };
+    await db.rewards.put(reward);
+    return reward;
+  });
 }
 
 export async function getAllRewards(): Promise<Reward[]> {
@@ -364,36 +368,44 @@ export async function calculateStreak(): Promise<{ current: number; longest: num
   const today = localDateKey();
   const yesterday = localDateKey(new Date(Date.now() - 86400000));
 
-  // Current streak
-  let current = 0;
-  let checkDate = new Date();
+  // Helper: count streak from a list of dates, allowing at most one 2-day gap
+  function countStreak(dateList: string[]): number {
+    if (dateList.length === 0) return 0;
+    let streak = 0;
+    let checkDate = new Date();
+    let gapUsed = false;
 
-  // Allow starting from today or yesterday (forgiving)
-  if (dates[0] !== today && dates[0] !== yesterday) {
-    return { current: 0, longest: 0, lastEntryDate: dates[0] ?? null };
-  }
-
-  for (const date of dates) {
-    const expected = localDateKey(checkDate);
-    if (date === expected) {
-      current++;
-      checkDate.setDate(checkDate.getDate() - 1);
-    } else if (date < expected) {
-      // Allow one gap (forgiving streaks)
-      checkDate.setDate(checkDate.getDate() - 1);
-      const expectedAfterGap = localDateKey(checkDate);
-      if (date === expectedAfterGap) {
-        current++;
+    for (const date of dateList) {
+      const expected = localDateKey(checkDate);
+      if (date === expected) {
+        streak++;
         checkDate.setDate(checkDate.getDate() - 1);
+      } else if (date < expected && !gapUsed) {
+        // Allow one gap: skip one day
+        gapUsed = true;
+        checkDate.setDate(checkDate.getDate() - 1);
+        const expectedAfterGap = localDateKey(checkDate);
+        if (date === expectedAfterGap) {
+          streak++;
+          checkDate.setDate(checkDate.getDate() - 1);
+        } else {
+          break;
+        }
       } else {
         break;
       }
     }
+    return streak;
   }
 
-  // Longest streak — use local calendar day math, not millisecond diffs
+  // Current streak — only active if latest entry is today or yesterday
+  const isStreakActive = dates[0] === today || dates[0] === yesterday;
+  const current = isStreakActive ? countStreak(dates) : 0;
+
+  // Longest streak — scan ALL date sequences (oldest to newest)
   let longest = 0;
   let tempStreak = 0;
+  let tempGapUsed = false;
   let prevDate: string | null = null;
 
   for (const date of [...dates].reverse()) {
@@ -401,18 +413,24 @@ export async function calculateStreak(): Promise<{ current: number; longest: num
       const prev = parseLocalDateKey(prevDate);
       const curr = parseLocalDateKey(date);
       const diffDays = Math.round((curr.getTime() - prev.getTime()) / 86400000);
-      if (diffDays === 1 || diffDays === 2) {
-        // forgiving — allow one gap
+      if (diffDays === 1) {
+        tempStreak++;
+      } else if (diffDays === 2 && !tempGapUsed) {
+        // Forgiving: allow one 2-day gap per streak
+        tempGapUsed = true;
         tempStreak++;
       } else {
+        // New streak
+        longest = Math.max(longest, tempStreak);
         tempStreak = 1;
+        tempGapUsed = false;
       }
     } else {
       tempStreak = 1;
     }
-    longest = Math.max(longest, tempStreak);
     prevDate = date;
   }
+  longest = Math.max(longest, tempStreak);
 
   return { current, longest, lastEntryDate: dates[0] ?? null };
 }

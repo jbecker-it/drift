@@ -77,6 +77,7 @@ export async function* streamChat(
   if (!reader) throw new Error('No readable stream');
 
   const decoder = new TextDecoder();
+  const reasoningFilter = createStreamingReasoningFilter();
   let buffer = '';
 
   while (true) {
@@ -94,7 +95,10 @@ export async function* streamChat(
         const json = JSON.parse(data);
         const delta = json.choices?.[0]?.delta?.content;
         if (delta) {
-          yield cleanReasoningOutput(delta);
+          // Use stateful filter to handle reasoning tags across chunks
+          reasoningFilter.push(delta);
+          const cleaned = reasoningFilter.flush();
+          if (cleaned) yield cleaned;
         }
       } catch {
         // skip malformed lines
@@ -130,17 +134,95 @@ export async function chatComplete(
   return json.choices?.[0]?.message?.content || '';
 }
 
-// ─── Reasoning block filter ─────────────────────────
+// ─── Reasoning block filter (streaming-aware) ────────
+
+// Tag patterns to strip from model output
+const TAG_PATTERNS = [
+  { open: '<thinking>', close: '</thinking>' },
+  { open: '<思考>', close: '</思考>' },
+  { open: '<think>', close: '</think>' },
+];
 
 /**
- * Strip leaked reasoning / thinking blocks from model output.
- * Some models inject <thinking>...</thinking> or similar into content.
+ * Create a stateful streaming reasoning filter.
+ * Call `.push(chunk)` for each SSE delta, then `.flush()` when the stream ends.
+ * Returns cleaned text that can be displayed incrementally.
  */
-export function cleanReasoningOutput(text: string): string {
-  // Do NOT .trim() here — this is called per streaming chunk and trimming
-  // strips leading whitespace from continuation tokens, corrupting output.
-  return text
-    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
-    .replace(/<思考>[\s\S]*?<\/思考>/gi, '')
-    .replace(/<think>[\s\S]*?<\/think>/gi, '');
+export function createStreamingReasoningFilter() {
+  let buffer = '';
+  let inTag = false;
+  let currentCloseTag = '';
+  let cleaned = '';
+
+  return {
+    push(chunk: string): string {
+      buffer += chunk;
+
+      if (inTag) {
+        // We're inside a reasoning tag — look for the closing tag
+        const closeIdx = buffer.indexOf(currentCloseTag);
+        if (closeIdx !== -1) {
+          // Found closing tag — skip everything up to and including it
+          buffer = buffer.substring(closeIdx + currentCloseTag.length);
+          inTag = false;
+          // Continue processing remaining buffer
+        } else {
+          // Still inside tag — don't output anything
+          return '';
+        }
+      }
+
+      // Process buffer for opening tags
+      while (buffer.length > 0) {
+        let earliestIdx = -1;
+        let matchedOpen = '';
+        let matchedClose = '';
+
+        for (const pat of TAG_PATTERNS) {
+          const idx = buffer.indexOf(pat.open);
+          if (idx !== -1 && (earliestIdx === -1 || idx < earliestIdx)) {
+            earliestIdx = idx;
+            matchedOpen = pat.open;
+            matchedClose = pat.close;
+          }
+        }
+
+        if (earliestIdx === -1) {
+          // No opening tag found — output everything up to the last safe position
+          // Keep a small tail in case a tag starts at the end
+          const safeLen = Math.max(0, buffer.length - 20);
+          if (safeLen > 0) {
+            cleaned += buffer.substring(0, safeLen);
+            buffer = buffer.substring(safeLen);
+          }
+          break;
+        }
+
+        // Output text before the tag
+        if (earliestIdx > 0) {
+          cleaned += buffer.substring(0, earliestIdx);
+          buffer = buffer.substring(earliestIdx);
+        }
+
+        // Check if closing tag is in the buffer
+        const closeIdx = buffer.indexOf(matchedClose);
+        if (closeIdx !== -1) {
+          // Both tags in buffer — remove the whole block
+          buffer = buffer.substring(closeIdx + matchedClose.length);
+        } else {
+          // Opening tag found but no closing yet — enter tag mode
+          inTag = true;
+          currentCloseTag = matchedClose;
+          buffer = buffer.substring(matchedOpen.length);
+          break;
+        }
+      }
+
+      return cleaned;
+    },
+
+    flush(): string {
+      return cleaned;
+    },
+  };
 }

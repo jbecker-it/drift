@@ -4,7 +4,7 @@
 
 import { chatComplete } from './openrouter';
 import {
-  getApiKey, getBackgroundModel, saveEntryTags, getEntrySummaries, updateEntry,
+  db, getApiKey, getBackgroundModel, saveEntryTags, getEntrySummaries, updateEntry,
   type JournalEntry, type EntryTags,
 } from '../db';
 import { getEntryTaggingPrompt, getWeeklySummaryPrompt, REQUEST_CONFIG } from './prompts';
@@ -48,18 +48,23 @@ export async function tagEntry(entry: JournalEntry): Promise<EntryTags | null> {
     const cleaned = raw.replace(/^```json?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
     const parsed: TaggingResult = JSON.parse(cleaned);
 
-    const tags = await saveEntryTags({
-      entryId: entry.id,
-      topics: parsed.topics ?? [],
-      mentions: {
-        sleep_hours: parsed.mentions?.sleep_hours ?? null,
-        mood_words: parsed.mentions?.mood_words ?? [],
-        tasks_open: parsed.mentions?.tasks_open ?? [],
-        tasks_done: parsed.mentions?.tasks_done ?? [],
-        people: parsed.mentions?.people ?? [],
-      },
-      one_line_summary: parsed.one_line_summary ?? '',
-      taggedAt: new Date().toISOString(),
+    // Verify entry still exists and save tags atomically (prevents orphan after delete)
+    const tags = await db.transaction('rw', db.entries, db.entryTags, async () => {
+      const entryStillExists = await db.entries.get(entry.id);
+      if (!entryStillExists) return null;
+      return saveEntryTags({
+        entryId: entry.id,
+        topics: parsed.topics ?? [],
+        mentions: {
+          sleep_hours: parsed.mentions?.sleep_hours ?? null,
+          mood_words: parsed.mentions?.mood_words ?? [],
+          tasks_open: parsed.mentions?.tasks_open ?? [],
+          tasks_done: parsed.mentions?.tasks_done ?? [],
+          people: parsed.mentions?.people ?? [],
+        },
+        one_line_summary: parsed.one_line_summary ?? '',
+        taggedAt: new Date().toISOString(),
+      });
     });
 
     // Mark as complete

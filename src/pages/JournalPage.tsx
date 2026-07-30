@@ -55,8 +55,8 @@ export default function JournalPage() {
   const reflectAbortRef = useRef<AbortController | null>(null);
   const topicAbortRef = useRef<AbortController | null>(null);
   const savedReflectAbortRef = useRef<AbortController | null>(null);
-  // Track pending auto-save to prevent race conditions (#3)
-  const pendingAutoSave = useRef<Promise<void> | null>(null);
+  // Auto-save serialization — prevents duplicate drafts from concurrent timers
+  const autoSaveChain = useRef<Promise<void>>(Promise.resolve());
   const isSavingRef = useRef(false);
 
   // Cleanup: abort all in-flight streams when component unmounts
@@ -75,11 +75,25 @@ export default function JournalPage() {
 
   useEffect(() => { loadEntries(); }, [loadEntries]);
 
+  // Recover any existing draft on mount
+  useEffect(() => {
+    if (activeEntryId) return; // Don't recover if already editing
+    (async () => {
+      const drafts = await db.entries.filter(e => e.isDraft).reverse().sortBy('created');
+      if (drafts.length > 0) {
+        const draft = drafts[0]; // Most recent draft
+        setBody(draft.body);
+        setMood(draft.mood);
+        draftIdRef.current = draft.id;
+      }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     setWordCount(body.split(/\s+/).filter(Boolean).length);
   }, [body]);
 
-  // Auto-save draft — only when not actively saving (#3)
+  // Auto-save draft — serialized via promise chain to prevent duplicates
   const autoSave = useCallback(async (text: string) => {
     if (text.trim().length < 10) return;
     if (isSavingRef.current) return;
@@ -95,8 +109,8 @@ export default function JournalPage() {
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     if (body.trim().length >= 10 && !activeEntryId) {
       autoSaveTimer.current = setTimeout(() => {
-        const promise = autoSave(body);
-        pendingAutoSave.current = promise?.then?.(() => { pendingAutoSave.current = null; }) ?? null;
+        // Chain onto previous auto-save to serialize them
+        autoSaveChain.current = autoSaveChain.current.then(() => autoSave(body)).catch(() => {});
       }, 5000);
     }
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
@@ -137,11 +151,8 @@ export default function JournalPage() {
     isSavingRef.current = true;
     setSaving(true);
 
-    // Wait for any pending auto-save to complete first (#3)
-    if (pendingAutoSave.current) {
-      try { await pendingAutoSave.current; } catch { /* auto-save failed, continue with manual save */ }
-      pendingAutoSave.current = null;
-    }
+    // Wait for any pending auto-save to complete first (serialized chain)
+    try { await autoSaveChain.current; } catch { /* auto-save failed, continue with manual save */ }
 
     try {
       let entryId = activeEntryId;

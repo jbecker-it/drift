@@ -151,9 +151,9 @@ export function buildMessages(
     return getTopicSuggestions(recentEntries);
   }
 
-  const personality = (typeof window !== 'undefined'
-    ? localStorage.getItem('drift_personality')
-    : null) as Personality | null || 'coach';
+  // Personality is only used for coach modes; topic uses its own prompt.
+  // Callers should use buildCoachMessages() directly for coach chat with validated personality.
+  const personality: Personality = 'coach';
 
   return buildCoachMessages(modeMap[systemType] || 'just_talk', personality, history, newMessage, recentEntries);
 }
