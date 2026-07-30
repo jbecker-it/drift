@@ -32,7 +32,7 @@ export default function EntriesPage() {
   }, []);
 
   const loadAll = useCallback(async () => {
-    const all = await db.entries.orderBy('created').reverse().toArray();
+    const all = await db.entries.orderBy('created').reverse().filter(e => !e.isDraft).toArray();
     setEntries(all);
   }, []);
 
@@ -43,14 +43,17 @@ export default function EntriesPage() {
     const now = new Date();
     return entries.filter(e => {
       const d = new Date(e.created);
+      const age = now.getTime() - d.getTime();
+      // Fix #14: Exclude future-dated entries
+      if (age < 0) return false;
       if (filter === 'today') {
         return d.toDateString() === now.toDateString();
       }
       if (filter === 'week') {
-        return (now.getTime() - d.getTime()) < 7 * 86400000;
+        return age < 7 * 86400000;
       }
       if (filter === 'month') {
-        return (now.getTime() - d.getTime()) < 30 * 86400000;
+        return age < 30 * 86400000;
       }
       return true;
     });
@@ -88,7 +91,6 @@ export default function EntriesPage() {
       const model = await getModel();
       if (!apiKey) return;
 
-      // Abort any previous in-flight stream
       abortRef.current?.abort();
       abortRef.current = new AbortController();
 
@@ -99,8 +101,10 @@ export default function EntriesPage() {
         setEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: result } : e));
       }
       await updateEntry(id, { aiReflection: result });
-    } catch {
-      setEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: 'Error.' } : e));
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: 'Error.' } : e));
+      }
     }
   };
 
@@ -121,11 +125,12 @@ export default function EntriesPage() {
       </div>
 
       {/* Filter bar */}
-      <div className="flex gap-2">
+      <div className="flex gap-2" role="group" aria-label="Filter entries">
         {filters.map(f => (
           <button
             key={f.key}
             onClick={() => setFilter(f.key)}
+            aria-pressed={filter === f.key}
             className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
               filter === f.key
                 ? 'bg-accent-green text-bg-primary font-medium'
@@ -154,6 +159,7 @@ export default function EntriesPage() {
                 {/* Header — tap to expand */}
                 <button
                   onClick={() => !isEditing && setExpandedEntry(isExpanded ? null : entry.id)}
+                  aria-expanded={isExpanded}
                   className="w-full text-left px-4 py-3 hover:bg-bg-hover transition-colors"
                 >
                   <div className="flex items-center justify-between">
@@ -181,6 +187,7 @@ export default function EntriesPage() {
                         <textarea
                           value={editBody}
                           onChange={(e) => setEditBody(e.target.value)}
+                          aria-label="Edit journal entry"
                           className="w-full min-h-[150px] p-3 bg-bg-input border border-border rounded-xl
                                      text-text-primary text-sm resize-none focus:outline-none
                                      focus:border-accent-green"
@@ -192,6 +199,8 @@ export default function EntriesPage() {
                             <button
                               key={m.value}
                               onClick={() => setEditMood(editMood === m.value ? undefined : m.value)}
+                              aria-label={`Mood: level ${m.value}`}
+                              aria-pressed={editMood === m.value}
                               className={`text-base transition-transform hover:scale-110 ${
                                 editMood === m.value ? 'scale-125 ring-2 ring-accent-green rounded-full' : 'opacity-50'
                               }`}
@@ -234,6 +243,7 @@ export default function EntriesPage() {
                         <div className="flex items-center gap-2 mt-3">
                           <button
                             onClick={() => handleReflect(entry)}
+                            aria-label="Generate reflection for this entry"
                             className="px-3 py-1.5 text-xs bg-bg-secondary border border-border rounded-lg
                                        text-text-secondary hover:text-accent-purple hover:border-accent-purple
                                        transition-colors"
@@ -242,6 +252,7 @@ export default function EntriesPage() {
                           </button>
                           <button
                             onClick={() => handleStartEdit(entry)}
+                            aria-label="Edit this entry"
                             className="px-3 py-1.5 text-xs bg-bg-secondary border border-border rounded-lg
                                        text-text-secondary hover:text-accent-blue hover:border-accent-blue
                                        transition-colors"
@@ -268,6 +279,7 @@ export default function EntriesPage() {
                           ) : (
                             <button
                               onClick={() => setConfirmDelete(entry.id)}
+                              aria-label="Delete this entry"
                               className="px-3 py-1.5 text-xs border border-border rounded-lg
                                          text-text-dim hover:text-red-400 hover:border-red-500/30
                                          transition-colors ml-auto"

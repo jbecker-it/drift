@@ -37,7 +37,7 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
               Dump your thoughts. Get AI-powered reflections. Build self-awareness.
             </p>
             <p className="text-text-muted text-sm">
-              All your data stays on this device. The AI uses OpenRouter.
+              Your journal is stored locally on this device. When you use AI features, entry text is sent to OpenRouter and your chosen model provider.
             </p>
             <button
               onClick={() => setStep(1)}
@@ -135,6 +135,7 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
               <div className="text-xs text-text-dim">deepseek/deepseek-v4-flash</div>
               <p className="text-xs text-text-muted leading-relaxed">
                 Used for entry tagging and weekly summaries. Runs automatically on save.
+                Entry text is sent to OpenRouter for processing.
               </p>
             </div>
 

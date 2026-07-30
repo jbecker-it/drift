@@ -13,6 +13,9 @@ export interface JournalEntry {
   aiReflection?: string;
   isDraft: boolean;
   wordCount: number;
+  /** 'pending' | 'complete' | 'failed' — auto-tagging status */
+  taggingStatus?: 'pending' | 'complete' | 'failed';
+  taggingError?: string;
 }
 
 export interface EntryTags {
@@ -81,6 +84,10 @@ class DriftDB extends Dexie {
     this.version(2).stores({
       entryTags: 'id, entryId, taggedAt',
     });
+    // v3: make entryId unique in entryTags to prevent duplicates
+    this.version(3).stores({
+      entryTags: 'entryId, taggedAt',
+    });
   }
 }
 
@@ -91,6 +98,12 @@ export const db = new DriftDB();
 /** Get a YYYY-MM-DD string in the user's local timezone (not UTC). */
 function localDateKey(date: Date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+/** Parse a YYYY-MM-DD key back to a local Date (avoids UTC midnight issues). */
+function parseLocalDateKey(key: string): Date {
+  const [y, m, d] = key.split('-').map(Number);
+  return new Date(y, m - 1, d);
 }
 
 // ─── Entry helpers ───────────────────────────────────
@@ -121,34 +134,106 @@ export async function saveDraft(body: string): Promise<JournalEntry> {
   return entry;
 }
 
+/**
+ * Finalize a draft into a permanent entry (updates in-place instead of creating duplicate).
+ */
+export async function finalizeDraft(
+  draftId: string,
+  body: string,
+  mood?: number,
+): Promise<JournalEntry> {
+  const wordCount = body.split(/\s+/).filter(Boolean).length;
+  const updates: Partial<JournalEntry> = {
+    body,
+    mood,
+    wordCount,
+    isDraft: false,
+  };
+  await db.entries.update(draftId, updates);
+  const entry = await db.entries.get(draftId);
+  if (!entry) throw new Error('Draft not found after finalization');
+  return entry;
+}
+
 export async function updateEntry(id: string, updates: Partial<JournalEntry>): Promise<void> {
+  const old = await db.entries.get(id);
   await db.entries.update(id, updates);
+
+  // Sync mood history if mood changed
+  if (updates.mood !== undefined && old) {
+    if (updates.mood === undefined) {
+      // Mood removed — delete the mood record
+      await db.moods.where('entryId').equals(id).delete();
+    } else if (updates.mood !== old.mood) {
+      // Mood changed — update or create mood record
+      const existing = await db.moods.where('entryId').equals(id).first();
+      if (existing) {
+        await db.moods.update(existing.id, { mood: updates.mood });
+      } else {
+        await db.moods.add({
+          id: uuid(),
+          date: localDateKey(new Date(old.created)),
+          mood: updates.mood,
+          entryId: id,
+        });
+      }
+    }
+  }
 }
 
+/**
+ * Delete an entry and all related data (tags, moods, sessions) in one transaction.
+ * Also cancels any pending background tagging for this entry.
+ */
 export async function deleteEntry(id: string): Promise<void> {
-  await db.entries.delete(id);
+  await db.transaction(
+    'rw',
+    db.entries,
+    db.entryTags,
+    db.moods,
+    db.sessions,
+    async () => {
+      await db.entries.delete(id);
+      await db.entryTags.where('entryId').equals(id).delete();
+      await db.moods.where('entryId').equals(id).delete();
+      await db.sessions.where('entryId').equals(id).delete();
+    },
+  );
 }
 
+/** Get non-draft entries only, ordered newest first. */
 export async function getRecentEntries(limit: number = 10): Promise<JournalEntry[]> {
-  return db.entries
+  const all = await db.entries
     .orderBy('created')
     .reverse()
+    .filter(e => !e.isDraft)
     .limit(limit)
     .toArray();
+  return all;
 }
 
+/** Get non-draft entries since a given date. */
 export async function getEntriesSince(date: Date): Promise<JournalEntry[]> {
   const results = await db.entries
     .where('created')
     .above(date.toISOString())
     .toArray();
-  return results.sort((a, b) => b.created.localeCompare(a.created));
+  return results
+    .filter(e => !e.isDraft)
+    .sort((a, b) => b.created.localeCompare(a.created));
 }
 
+/** Get today's non-draft entries. */
 export async function getTodaysEntries(): Promise<JournalEntry[]> {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return getEntriesSince(today);
+}
+
+/** Get ALL non-draft entries (for accurate total counts). */
+export async function getAllNonDraftEntries(): Promise<JournalEntry[]> {
+  const all = await db.entries.toArray();
+  return all.filter(e => !e.isDraft);
 }
 
 // ─── Session helpers ─────────────────────────────────
@@ -241,36 +326,40 @@ export async function getApiKey(): Promise<string | null> {
 }
 
 export async function getModel(): Promise<string> {
-  // Default per handoff doc: Claude Sonnet 5 won the five-model blind comparison
   return (await getSetting('openrouter_model')) || 'anthropic/claude-sonnet-5';
 }
 
 export async function getBackgroundModel(): Promise<string> {
   const val = await getSetting('openrouter_background_model');
   if (val === 'same') {
-    return getModel(); // user explicitly chose "same as primary"
+    return getModel();
   }
-  return val || 'deepseek/deepseek-v4-flash'; // default: DeepSeek V4 Flash
+  return val || 'deepseek/deepseek-v4-flash';
 }
 
 export async function setBackgroundModel(model: string): Promise<void> {
   await setSetting('openrouter_background_model', model);
 }
 
+const VALID_PERSONALITIES: readonly string[] = ['coach', 'listener', 'challenger'];
+
 export async function getPersonality(): Promise<string> {
-  return (await getSetting('personality')) || 'coach';
+  const val = (await getSetting('personality')) || 'coach';
+  return VALID_PERSONALITIES.includes(val) ? val : 'coach';
 }
 
 // ─── Streak calculation ──────────────────────────────
 
 export async function calculateStreak(): Promise<{ current: number; longest: number; lastEntryDate: string | null }> {
   const allEntries = await db.entries.toArray();
-  const entries = allEntries.sort((a: JournalEntry, b: JournalEntry) => b.created.localeCompare(a.created));
+  const entries = allEntries
+    .filter(e => !e.isDraft)
+    .sort((a, b) => b.created.localeCompare(a.created));
 
   if (entries.length === 0) return { current: 0, longest: 0, lastEntryDate: null };
 
-  // Get unique dates (local timezone, not UTC)
-  const dates = [...new Set(entries.map((e: JournalEntry) => localDateKey(new Date(e.created))))].sort().reverse();
+  // Get unique local dates
+  const dates = [...new Set(entries.map(e => localDateKey(new Date(e.created))))].sort().reverse();
 
   const today = localDateKey();
   const yesterday = localDateKey(new Date(Date.now() - 86400000));
@@ -302,19 +391,17 @@ export async function calculateStreak(): Promise<{ current: number; longest: num
     }
   }
 
-  // Longest streak (iterate oldest-first so prev is always earlier)
+  // Longest streak — use local calendar day math, not millisecond diffs
   let longest = 0;
   let tempStreak = 0;
   let prevDate: string | null = null;
 
   for (const date of [...dates].reverse()) {
     if (prevDate) {
-      const prev = new Date(prevDate);
-      const curr = new Date(date as string);
-      const diff = (curr.getTime() - prev.getTime()) / 86400000;
-      if (diff === 1) {
-        tempStreak++;
-      } else if (diff === 2) {
+      const prev = parseLocalDateKey(prevDate);
+      const curr = parseLocalDateKey(date);
+      const diffDays = Math.round((curr.getTime() - prev.getTime()) / 86400000);
+      if (diffDays === 1 || diffDays === 2) {
         // forgiving — allow one gap
         tempStreak++;
       } else {
@@ -324,7 +411,7 @@ export async function calculateStreak(): Promise<{ current: number; longest: num
       tempStreak = 1;
     }
     longest = Math.max(longest, tempStreak);
-    prevDate = date as string;
+    prevDate = date;
   }
 
   return { current, longest, lastEntryDate: dates[0] ?? null };
@@ -356,6 +443,14 @@ export async function clearAllData(): Promise<void> {
 // ─── Entry tags helpers ──────────────────────────────
 
 export async function saveEntryTags(tags: Omit<EntryTags, 'id'>): Promise<EntryTags> {
+  // Use entryId as the key to prevent duplicates
+  const existing = await db.entryTags.where('entryId').equals(tags.entryId).first();
+  if (existing) {
+    // Update existing tag record
+    const updated: EntryTags = { ...existing, ...tags };
+    await db.entryTags.put(updated);
+    return updated;
+  }
   const record: EntryTags = { ...tags, id: uuid() };
   await db.entryTags.put(record);
   return record;

@@ -9,11 +9,5 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   </React.StrictMode>,
 )
 
-// Register service worker for PWA installability
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {
-      // SW registration failed — app still works, just not installable
-    });
-  });
-}
+// Service worker is registered automatically by vite-plugin-pwa
+// No manual registration needed

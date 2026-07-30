@@ -137,9 +137,10 @@ export async function chatComplete(
  * Some models inject <thinking>...</thinking> or similar into content.
  */
 export function cleanReasoningOutput(text: string): string {
+  // Do NOT .trim() here — this is called per streaming chunk and trimming
+  // strips leading whitespace from continuation tokens, corrupting output.
   return text
     .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
     .replace(/<思考>[\s\S]*?<\/思考>/gi, '')
-    .replace(/<think>[\s\S]*?<\/think>/gi, '')
-    .trim();
+    .replace(/<think>[\s\S]*?<\/think>/gi, '');
 }

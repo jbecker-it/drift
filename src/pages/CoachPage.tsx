@@ -13,6 +13,17 @@ const QUICK_STARTS: { label: string; mode: CoachMode; prompt: string; desc: stri
   { label: '💬 Just talk', mode: 'just_talk', prompt: '', desc: 'Open conversation' },
 ];
 
+/** Sanitize error messages for display — never show raw provider errors (#16). */
+function sanitizeError(err: any): string {
+  if (err?.name === 'AbortError') return '';
+  const msg = String(err?.message || '').toLowerCase();
+  if (msg.includes('401') || msg.includes('unauthorized')) return 'Invalid API key. Check your key in Settings.';
+  if (msg.includes('402') || msg.includes('payment') || msg.includes('credit')) return 'Out of credits. Add funds at openrouter.ai or switch to a free model.';
+  if (msg.includes('429') || msg.includes('rate limit')) return 'Too many requests. Wait a moment and try again.';
+  if (msg.includes('503') || msg.includes('overloaded')) return 'Model is overloaded. Try again in a few minutes.';
+  return 'The AI response could not be generated. Check your connection, API key, and selected model.';
+}
+
 export default function CoachPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -45,7 +56,6 @@ export default function CoachPage() {
   useEffect(scrollToBottom, [messages]);
 
   const startSession = async (mode: CoachMode, greeting?: string) => {
-    // Map new mode names to the existing ChatSession promptType union
     const sessionType = mode === 'brain_dump' ? 'dump'
       : mode === 'morning_checkin' ? 'morning'
       : mode === 'evening_winddown' ? 'evening'
@@ -131,8 +141,9 @@ export default function CoachPage() {
         await addMessageToSession(currentSessionId, 'assistant', assistantContent);
       }
     } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${err.message}` }]);
+      const errorText = sanitizeError(err);
+      if (errorText) {
+        setMessages(prev => [...prev, { role: 'assistant', content: errorText }]);
       }
     } finally {
       setIsStreaming(false);
@@ -152,13 +163,18 @@ export default function CoachPage() {
     }
   };
 
+  // Fix #8: Cancel in-flight stream before ending session
   const handleEndSession = async () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsStreaming(false);
+
     if (sessionId) {
       await endSession(sessionId);
-      setSessionId(null);
-      setMessages([]);
-      setCurrentMode('just_talk');
     }
+    setSessionId(null);
+    setMessages([]);
+    setCurrentMode('just_talk');
   };
 
   return (
@@ -177,6 +193,7 @@ export default function CoachPage() {
         {messages.length > 0 && (
           <button
             onClick={handleEndSession}
+            aria-label="End this coaching session"
             className="px-4 py-2 text-sm border border-border rounded-xl
                        text-text-secondary hover:text-accent-amber hover:border-accent-amber
                        transition-colors"
@@ -237,6 +254,7 @@ export default function CoachPage() {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={isStreaming ? 'AI is thinking...' : 'Type a message...'}
+          aria-label="Coach chat message"
           disabled={isStreaming}
           rows={1}
           className="flex-1 px-4 py-3 bg-bg-input border border-border rounded-xl
@@ -247,6 +265,7 @@ export default function CoachPage() {
         {isStreaming ? (
           <button
             onClick={handleStop}
+            aria-label="Stop generating response"
             className="px-4 py-3 bg-accent-amber text-bg-primary rounded-xl
                        hover:bg-accent-amber/90 transition-colors"
           >
@@ -256,6 +275,7 @@ export default function CoachPage() {
           <button
             onClick={() => handleSend()}
             disabled={!input.trim()}
+            aria-label="Send message"
             className="px-4 py-3 bg-accent-green text-bg-primary rounded-xl
                        hover:bg-accent-green/90 transition-colors
                        disabled:opacity-40 disabled:cursor-not-allowed"

@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getRecentEntries, calculateStreak, getMoodHistory, getAllRewards, type JournalEntry, type MoodEntry, type Reward } from '../db';
+import { getAllNonDraftEntries, calculateStreak, getMoodHistory, getAllRewards, type JournalEntry, type MoodEntry, type Reward } from '../db';
 import { generateWeeklySummary } from '../ai/tagging';
 
 export default function DashboardPage() {
   const [entries, setEntries] = useState<JournalEntry[]>([]);
+  const [totalEntries, setTotalEntries] = useState(0);
+  const [totalWords, setTotalWords] = useState(0);
   const [streak, setStreak] = useState({ current: 0, longest: 0, lastEntryDate: null as string | null });
   const [moods, setMoods] = useState<MoodEntry[]>([]);
   const [rewards, setRewards] = useState<Reward[]>([]);
@@ -11,13 +13,17 @@ export default function DashboardPage() {
   const [loadingInsight, setLoadingInsight] = useState(false);
 
   const loadData = useCallback(async () => {
-    const [recentEntries, currentStreak, moodHistory, allRewards] = await Promise.all([
-      getRecentEntries(20),
+    const [allEntries, currentStreak, moodHistory, allRewards] = await Promise.all([
+      getAllNonDraftEntries(),
       calculateStreak(),
       getMoodHistory(30),
       getAllRewards(),
     ]);
-    setEntries(recentEntries);
+    // Use full entry list for accurate totals (#7)
+    setTotalEntries(allEntries.length);
+    setTotalWords(allEntries.reduce((sum, e) => sum + e.wordCount, 0));
+    // Show only recent 5 for display
+    setEntries(allEntries.slice(0, 5));
     setStreak(currentStreak);
     setMoods(moodHistory);
     setRewards(allRewards);
@@ -47,15 +53,6 @@ export default function DashboardPage() {
 
   const moodLabels = ['😞', '😐', '🙂', '😊', '🤩'];
   const moodColors = ['bg-mood-1', 'bg-mood-2', 'bg-mood-3', 'bg-mood-4', 'bg-mood-5'];
-
-  // Stats
-  const totalEntries = entries.length;
-  const totalWords = entries.reduce((sum, e) => sum + e.wordCount, 0);
-  const thisWeek = entries.filter(e => {
-    const d = new Date(e.created);
-    const now = new Date();
-    return (now.getTime() - d.getTime()) < 7 * 86400000;
-  }).length;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -114,9 +111,9 @@ export default function DashboardPage() {
           <p className="text-sm text-text-secondary leading-relaxed whitespace-pre-wrap">{weeklyInsight}</p>
         ) : (
           <p className="text-sm text-text-dim italic">
-            {thisWeek > 0
-              ? `You've written ${thisWeek} ${thisWeek === 1 ? 'entry' : 'entries'} this week. Click "Generate" for a weekly summary.`
-              : 'No entries this week yet. Start journaling to unlock summaries!'
+            {totalEntries > 0
+              ? `You've written ${totalEntries} ${totalEntries === 1 ? 'entry' : 'entries'} so far. Click "Generate" for a weekly summary.`
+              : 'No entries yet. Start journaling to unlock summaries!'
             }
           </p>
         )}
@@ -145,7 +142,7 @@ export default function DashboardPage() {
             <p>No entries yet. Start journaling!</p>
           </div>
         ) : (
-          entries.slice(0, 5).map(entry => (
+          entries.map(entry => (
             <div key={entry.id} className="bg-bg-card border border-border rounded-xl p-4">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs text-text-dim">

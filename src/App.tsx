@@ -23,7 +23,12 @@ function Sidebar() {
     <>
       {/* Mobile top bar */}
       <div className="lg:hidden fixed top-0 left-0 right-0 z-50 bg-bg-secondary border-b border-border px-4 py-3 flex items-center justify-between">
-        <button onClick={() => setIsOpen(!isOpen)} className="text-text-secondary hover:text-text-primary">
+        <button
+          onClick={() => setIsOpen(!isOpen)}
+          aria-label={isOpen ? 'Close navigation menu' : 'Open navigation menu'}
+          aria-expanded={isOpen}
+          className="text-text-secondary hover:text-text-primary"
+        >
           <svg width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2">
             {isOpen ? (
               <path d="M6 6l12 12M6 18L18 6" />

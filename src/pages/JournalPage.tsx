@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  saveEntry, saveDraft, getRecentEntries, logMood, updateEntry, deleteEntry, db,
+  saveEntry, saveDraft, finalizeDraft, getRecentEntries, logMood, updateEntry, deleteEntry, db,
+  awardReward,
   type JournalEntry,
 } from '../db';
 import { streamChat } from '../ai/openrouter';
@@ -15,6 +16,19 @@ const MOODS = [
   { value: 4, emoji: '😊', label: 'Good' },
   { value: 5, emoji: '🤩', label: 'Great' },
 ];
+
+// ─── Award achievements after a successful save ──────
+async function checkAndAwardAchievements(entryCount: number, wordCount: number) {
+  if (entryCount === 1) {
+    await awardReward('insight', '🌱 First Entry', 'You just wrote your first entry');
+  }
+  if (entryCount >= 50) {
+    await awardReward('wordcount', '🧠 Brain Dump Champion', '50+ entries and counting');
+  }
+  if (wordCount >= 1000) {
+    await awardReward('deepthought', '💭 Deep Thinker', 'Written over 1,000 words total');
+  }
+}
 
 export default function JournalPage() {
   const [body, setBody] = useState('');
@@ -37,12 +51,20 @@ export default function JournalPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftIdRef = useRef<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  // Separate abort controllers for each operation to avoid interference (#9)
+  const reflectAbortRef = useRef<AbortController | null>(null);
+  const topicAbortRef = useRef<AbortController | null>(null);
+  const savedReflectAbortRef = useRef<AbortController | null>(null);
+  // Track pending auto-save to prevent race conditions (#3)
+  const pendingAutoSave = useRef<Promise<void> | null>(null);
+  const isSavingRef = useRef(false);
 
-  // Cleanup: abort any in-flight streams when component unmounts
+  // Cleanup: abort all in-flight streams when component unmounts
   useEffect(() => {
     return () => {
-      abortRef.current?.abort();
+      reflectAbortRef.current?.abort();
+      topicAbortRef.current?.abort();
+      savedReflectAbortRef.current?.abort();
     };
   }, []);
 
@@ -57,9 +79,10 @@ export default function JournalPage() {
     setWordCount(body.split(/\s+/).filter(Boolean).length);
   }, [body]);
 
-  // Auto-save draft
+  // Auto-save draft — only when not actively saving (#3)
   const autoSave = useCallback(async (text: string) => {
     if (text.trim().length < 10) return;
+    if (isSavingRef.current) return;
     if (draftIdRef.current) {
       await updateEntry(draftIdRef.current, { body: text, wordCount: text.split(/\s+/).filter(Boolean).length });
     } else {
@@ -71,7 +94,10 @@ export default function JournalPage() {
   useEffect(() => {
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     if (body.trim().length >= 10 && !activeEntryId) {
-      autoSaveTimer.current = setTimeout(() => autoSave(body), 5000);
+      autoSaveTimer.current = setTimeout(() => {
+        const promise = autoSave(body);
+        pendingAutoSave.current = promise?.then?.(() => { pendingAutoSave.current = null; }) ?? null;
+      }, 5000);
     }
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
   }, [body, autoSave, activeEntryId]);
@@ -85,20 +111,21 @@ export default function JournalPage() {
       const model = await getModel();
       if (!apiKey) { setReflection('Set your API key in Settings first.'); return; }
 
-      // Abort any previous in-flight stream
-      abortRef.current?.abort();
-      abortRef.current = new AbortController();
+      reflectAbortRef.current?.abort();
+      reflectAbortRef.current = new AbortController();
 
       const messages = getReflectionPrompt(entryBody);
       let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model }, abortRef.current.signal, REQUEST_CONFIG.reflect)) {
+      for await (const chunk of streamChat(messages, { apiKey, model }, reflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
         setReflection(result);
       }
       await updateEntry(entryId, { aiReflection: result });
       await loadEntries();
-    } catch {
-      setReflection('Could not generate reflection. Check your API key and model.');
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setReflection('Could not generate reflection. Check your API key and model.');
+      }
     } finally {
       setReflecting(false);
     }
@@ -106,13 +133,21 @@ export default function JournalPage() {
 
   // ─── Save (new entry or update existing) ───────────
   const handleSave = async () => {
-    if (!body.trim()) return;
+    if (!body.trim() || isSavingRef.current) return;
+    isSavingRef.current = true;
     setSaving(true);
+
+    // Wait for any pending auto-save to complete first (#3)
+    if (pendingAutoSave.current) {
+      try { await pendingAutoSave.current; } catch { /* auto-save failed, continue with manual save */ }
+      pendingAutoSave.current = null;
+    }
+
     try {
       let entryId = activeEntryId;
 
       if (entryId) {
-        // Updating existing entry (continue writing)
+        // Updating existing entry
         await updateEntry(entryId, {
           body,
           mood,
@@ -120,18 +155,27 @@ export default function JournalPage() {
         });
       } else {
         // New entry
-        const entry = await saveEntry(body, mood);
+        let entry: JournalEntry;
+
+        if (draftIdRef.current) {
+          // Finalize existing draft instead of creating duplicate (#3)
+          entry = await finalizeDraft(draftIdRef.current, body, mood);
+          draftIdRef.current = null;
+        } else {
+          entry = await saveEntry(body, mood);
+        }
+
         entryId = entry.id;
         if (mood) await logMood(mood, entry.id);
         setActiveEntryId(entryId);
-        // Clean up any auto-saved draft
-        if (draftIdRef.current) {
-          await deleteEntry(draftIdRef.current);
-          draftIdRef.current = null;
-        }
 
         // Fire-and-forget: auto-tag the entry in the background
         tagEntry({ id: entry.id, body, created: entry.created, isDraft: false, wordCount: entry.wordCount });
+
+        // Award achievements (#12)
+        const totalEntries = (await db.entries.toArray()).filter(e => !e.isDraft).length;
+        const totalWords = (await db.entries.toArray()).filter(e => !e.isDraft).reduce((s, e) => s + e.wordCount, 0);
+        checkAndAwardAchievements(totalEntries, totalWords);
       }
 
       await loadEntries();
@@ -142,6 +186,7 @@ export default function JournalPage() {
       // Show continue option
       setShowContinue(true);
     } finally {
+      isSavingRef.current = false;
       setSaving(false);
     }
   };
@@ -180,18 +225,19 @@ export default function JournalPage() {
       const model = await getModel();
       if (!apiKey) { setReflection('Set your API key in Settings.'); return; }
 
-      // Abort any previous in-flight stream
-      abortRef.current?.abort();
-      abortRef.current = new AbortController();
+      reflectAbortRef.current?.abort();
+      reflectAbortRef.current = new AbortController();
 
       const messages = getReflectionPrompt(body);
       let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model }, abortRef.current.signal, REQUEST_CONFIG.reflect)) {
+      for await (const chunk of streamChat(messages, { apiKey, model }, reflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
         setReflection(result);
       }
-    } catch {
-      setReflection('Could not generate reflection.');
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setReflection('Could not generate reflection.');
+      }
     } finally {
       setReflecting(false);
     }
@@ -223,19 +269,20 @@ export default function JournalPage() {
       const model = await getModel();
       if (!apiKey) return;
 
-      // Abort any previous in-flight stream
-      abortRef.current?.abort();
-      abortRef.current = new AbortController();
+      savedReflectAbortRef.current?.abort();
+      savedReflectAbortRef.current = new AbortController();
 
       const messages = getReflectionPrompt(entry.body);
       let result = '';
-      for await (const chunk of streamChat(messages, { apiKey, model }, abortRef.current.signal, REQUEST_CONFIG.reflect)) {
+      for await (const chunk of streamChat(messages, { apiKey, model }, savedReflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
         setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: result } : e));
       }
       await updateEntry(id, { aiReflection: result });
-    } catch {
-      setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: 'Error.' } : e));
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: 'Error.' } : e));
+      }
     }
   };
 
@@ -249,18 +296,19 @@ export default function JournalPage() {
       if (!apiKey) { setSuggestions(['Set your API key in Settings to get topic suggestions.']); return; }
       const recentContext = recentEntries.map(e => `[${e.created.split('T')[0]}] ${e.body.substring(0, 200)}`).join('\n');
 
-      // Abort any previous in-flight stream
-      abortRef.current?.abort();
-      abortRef.current = new AbortController();
+      topicAbortRef.current?.abort();
+      topicAbortRef.current = new AbortController();
 
       const messages = buildMessages('topic', [], 'Suggest what I should write about today.', recentContext || undefined);
       let response = '';
-      for await (const chunk of streamChat(messages, { apiKey, model }, abortRef.current.signal, REQUEST_CONFIG.topic_suggest)) { response += chunk; }
+      for await (const chunk of streamChat(messages, { apiKey, model }, topicAbortRef.current.signal, REQUEST_CONFIG.topic_suggest)) { response += chunk; }
       const lines = response.split('\n').filter(l => l.trim());
       const parsed = lines.map(l => l.replace(/^[-•*\d.]+\s*/, '').trim()).filter(Boolean);
       setSuggestions(parsed.length > 0 ? parsed : [response]);
-    } catch {
-      setSuggestions(['Could not generate suggestions.']);
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setSuggestions(['Could not generate suggestions.']);
+      }
     } finally {
       setLoadingSuggestions(false);
     }
@@ -289,6 +337,7 @@ export default function JournalPage() {
         </div>
         <button
           onClick={handleSuggestTopics}
+          aria-label="Get topic suggestions"
           className="px-3 py-2 text-sm bg-bg-card border border-border rounded-xl
                      text-text-secondary hover:text-accent-amber hover:border-accent-amber
                      transition-colors"
@@ -302,7 +351,7 @@ export default function JournalPage() {
         <div className="bg-bg-card border border-border rounded-xl p-4 animate-slide-up">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-medium text-accent-amber">Topic suggestions</h3>
-            <button onClick={() => setShowSuggestions(false)} className="text-text-dim hover:text-text-secondary">✕</button>
+            <button onClick={() => setShowSuggestions(false)} aria-label="Close suggestions" className="text-text-dim hover:text-text-secondary">✕</button>
           </div>
           {loadingSuggestions ? (
             <div className="text-text-muted text-sm animate-pulse-gentle">Thinking...</div>
@@ -331,6 +380,7 @@ export default function JournalPage() {
           onChange={(e) => setBody(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Dump your thoughts here. No judgment."
+          aria-label="Journal entry"
           className="w-full min-h-[250px] p-5 bg-transparent text-text-primary
                      placeholder:text-text-dim resize-none leading-relaxed
                      focus:outline-none"
@@ -345,10 +395,11 @@ export default function JournalPage() {
               <button
                 key={m.value}
                 onClick={() => setMood(mood === m.value ? undefined : m.value)}
+                aria-label={`Mood: ${m.label}`}
+                aria-pressed={mood === m.value}
                 className={`text-lg transition-transform hover:scale-110 ${
                   mood === m.value ? 'scale-125 ring-2 ring-accent-green rounded-full' : 'opacity-50'
                 }`}
-                title={m.label}
               >
                 {m.emoji}
               </button>
@@ -435,6 +486,7 @@ export default function JournalPage() {
               <div key={entry.id} className="bg-bg-card border border-border rounded-xl overflow-hidden">
                 <button
                   onClick={() => setExpandedEntry(isExpanded ? null : entry.id)}
+                  aria-expanded={isExpanded}
                   className="w-full text-left px-4 py-3 hover:bg-bg-hover transition-colors"
                 >
                   <div className="flex items-center justify-between">
@@ -466,6 +518,7 @@ export default function JournalPage() {
                     <div className="flex items-center gap-2 mt-3">
                       <button
                         onClick={() => handleReflectSaved(entry)}
+                        aria-label="Generate reflection for this entry"
                         className="px-3 py-1.5 text-xs bg-bg-secondary border border-border rounded-lg
                                    text-text-secondary hover:text-accent-purple hover:border-accent-purple transition-colors"
                       >
@@ -473,6 +526,7 @@ export default function JournalPage() {
                       </button>
                       <button
                         onClick={() => { handleEditEntry(entry); setExpandedEntry(null); }}
+                        aria-label="Edit this entry"
                         className="px-3 py-1.5 text-xs bg-bg-secondary border border-border rounded-lg
                                    text-text-secondary hover:text-accent-blue hover:border-accent-blue transition-colors"
                       >
@@ -491,6 +545,7 @@ export default function JournalPage() {
                         </div>
                       ) : (
                         <button onClick={() => setConfirmDelete(entry.id)}
+                          aria-label="Delete this entry"
                           className="px-3 py-1.5 text-xs border border-border rounded-lg text-text-dim hover:text-red-400 hover:border-red-500/30 transition-colors ml-auto">
                           🗑️
                         </button>
@@ -506,6 +561,3 @@ export default function JournalPage() {
     </div>
   );
 }
-
-// Need db import for handleContinue
-// db already imported at top

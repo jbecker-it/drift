@@ -289,7 +289,7 @@ export default function SettingsPage() {
           <div>
             <h3 className="text-sm font-medium text-text-secondary">Background Model</h3>
             <p className="text-xs text-text-dim mt-0.5">
-              Used for entry tagging and summaries (runs locally on save)
+              Used for entry tagging and summaries (sends entry text to OpenRouter on save)
             </p>
           </div>
           <button

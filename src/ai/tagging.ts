@@ -4,7 +4,7 @@
 
 import { chatComplete } from './openrouter';
 import {
-  getApiKey, getBackgroundModel, saveEntryTags, getEntrySummaries,
+  getApiKey, getBackgroundModel, saveEntryTags, getEntrySummaries, updateEntry,
   type JournalEntry, type EntryTags,
 } from '../db';
 import { getEntryTaggingPrompt, getWeeklySummaryPrompt, REQUEST_CONFIG } from './prompts';
@@ -25,13 +25,16 @@ export interface TaggingResult {
 
 /**
  * Tag a journal entry with structured data using the background model.
- * Runs fire-and-forget on entry save — errors are swallowed silently.
+ * Runs fire-and-forget on entry save. Tracks status on the entry itself (#10).
  */
 export async function tagEntry(entry: JournalEntry): Promise<EntryTags | null> {
+  // Mark as pending
+  await updateEntry(entry.id, { taggingStatus: 'pending' });
+
   try {
     const apiKey = await getApiKey();
     const model = await getBackgroundModel();
-    if (!apiKey) return null;
+    if (!apiKey) throw new Error('API key not set');
 
     const messages = getEntryTaggingPrompt(entry.body);
     const raw = await chatComplete(
@@ -59,11 +62,23 @@ export async function tagEntry(entry: JournalEntry): Promise<EntryTags | null> {
       taggedAt: new Date().toISOString(),
     });
 
+    // Mark as complete
+    await updateEntry(entry.id, { taggingStatus: 'complete', taggingError: undefined });
+
     return tags;
-  } catch {
-    // Background job — fail silently, don't block the UI
+  } catch (err: any) {
+    // Record the error on the entry so UI can show retry option (#10)
+    const errorMsg = err?.message || 'Unknown error';
+    await updateEntry(entry.id, { taggingStatus: 'failed', taggingError: errorMsg });
     return null;
   }
+}
+
+/**
+ * Retry tagging for a failed entry.
+ */
+export async function retryTagEntry(entry: JournalEntry): Promise<EntryTags | null> {
+  return tagEntry(entry);
 }
 
 // ─── Weekly summary ─────────────────────────────────
