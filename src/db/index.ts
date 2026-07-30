@@ -366,7 +366,10 @@ export async function calculateStreak(): Promise<{ current: number; longest: num
   const dates = [...new Set(entries.map(e => localDateKey(new Date(e.created))))].sort().reverse();
 
   const today = localDateKey();
-  const yesterday = localDateKey(new Date(Date.now() - 86400000));
+  // Use local calendar arithmetic for DST safety
+  const yesterdayDate = new Date();
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterday = localDateKey(yesterdayDate);
 
   // Helper: count streak from a list of dates, allowing at most one 2-day gap
   function countStreak(dateList: string[]): number {

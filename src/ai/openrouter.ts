@@ -90,14 +90,17 @@ export async function* streamChat(
     for (const line of lines) {
       if (!line.startsWith('data: ')) continue;
       const data = line.slice(6);
-      if (data === '[DONE]') return;
+      if (data === '[DONE]') {
+        // Flush any remaining buffered text
+        const tail = reasoningFilter.finish();
+        if (tail) yield tail;
+        return;
+      }
       try {
         const json = JSON.parse(data);
         const delta = json.choices?.[0]?.delta?.content;
         if (delta) {
-          // Use stateful filter to handle reasoning tags across chunks
-          reasoningFilter.push(delta);
-          const cleaned = reasoningFilter.flush();
+          const cleaned = reasoningFilter.push(delta);
           if (cleaned) yield cleaned;
         }
       } catch {
@@ -105,6 +108,9 @@ export async function* streamChat(
       }
     }
   }
+  // Stream ended without [DONE] — flush remaining
+  const tail = reasoningFilter.finish();
+  if (tail) yield tail;
 }
 
 // ─── Non-streaming chat completion ──────────────────
@@ -152,77 +158,97 @@ export function createStreamingReasoningFilter() {
   let buffer = '';
   let inTag = false;
   let currentCloseTag = '';
-  let cleaned = '';
+  let outputIdx = 0; // Track how much we've already output
+  let textParts: string[] = []; // Accumulate cleaned text parts
+  let finished = false;
+
+  function processBuffer(): void {
+    if (inTag) {
+      const closeIdx = buffer.indexOf(currentCloseTag);
+      if (closeIdx !== -1) {
+        buffer = buffer.substring(closeIdx + currentCloseTag.length);
+        inTag = false;
+      } else {
+        return; // Still inside tag
+      }
+    }
+
+    while (buffer.length > 0 && !inTag) {
+      let earliestIdx = -1;
+      let matchedClose = '';
+
+      for (const pat of TAG_PATTERNS) {
+        const idx = buffer.indexOf(pat.open);
+        if (idx !== -1 && (earliestIdx === -1 || idx < earliestIdx)) {
+          earliestIdx = idx;
+          matchedClose = pat.close;
+        }
+      }
+
+      if (earliestIdx === -1) {
+        // No tag found — keep a small tail in case a tag starts at the boundary
+        const safeLen = Math.max(0, buffer.length - 20);
+        if (safeLen > 0) {
+          textParts.push(buffer.substring(0, safeLen));
+          buffer = buffer.substring(safeLen);
+        }
+        break;
+      }
+
+      // Output text before the tag
+      if (earliestIdx > 0) {
+        textParts.push(buffer.substring(0, earliestIdx));
+        buffer = buffer.substring(earliestIdx);
+      }
+
+      // Check if closing tag is in the buffer
+      const closeIdx = buffer.indexOf(matchedClose);
+      if (closeIdx !== -1) {
+        buffer = buffer.substring(closeIdx + matchedClose.length);
+      } else {
+        inTag = true;
+        currentCloseTag = matchedClose;
+        // Skip past the opening tag
+        for (const pat of TAG_PATTERNS) {
+          if (pat.close === matchedClose) {
+            buffer = buffer.substring(pat.open.length);
+            break;
+          }
+        }
+        break;
+      }
+    }
+  }
 
   return {
     push(chunk: string): string {
+      if (finished) return '';
       buffer += chunk;
+      processBuffer();
+      // Return only NEW text since last call
+      const newText = textParts.join('');
+      const newOutput = newText.substring(outputIdx);
+      outputIdx = newText.length;
+      return newOutput;
+    },
 
-      if (inTag) {
-        // We're inside a reasoning tag — look for the closing tag
-        const closeIdx = buffer.indexOf(currentCloseTag);
-        if (closeIdx !== -1) {
-          // Found closing tag — skip everything up to and including it
-          buffer = buffer.substring(closeIdx + currentCloseTag.length);
-          inTag = false;
-          // Continue processing remaining buffer
-        } else {
-          // Still inside tag — don't output anything
-          return '';
-        }
+    finish(): string {
+      finished = true;
+      // Release any remaining buffer (no more tags expected)
+      if (buffer.length > 0) {
+        textParts.push(buffer);
+        buffer = '';
       }
-
-      // Process buffer for opening tags
-      while (buffer.length > 0) {
-        let earliestIdx = -1;
-        let matchedOpen = '';
-        let matchedClose = '';
-
-        for (const pat of TAG_PATTERNS) {
-          const idx = buffer.indexOf(pat.open);
-          if (idx !== -1 && (earliestIdx === -1 || idx < earliestIdx)) {
-            earliestIdx = idx;
-            matchedOpen = pat.open;
-            matchedClose = pat.close;
-          }
-        }
-
-        if (earliestIdx === -1) {
-          // No opening tag found — output everything up to the last safe position
-          // Keep a small tail in case a tag starts at the end
-          const safeLen = Math.max(0, buffer.length - 20);
-          if (safeLen > 0) {
-            cleaned += buffer.substring(0, safeLen);
-            buffer = buffer.substring(safeLen);
-          }
-          break;
-        }
-
-        // Output text before the tag
-        if (earliestIdx > 0) {
-          cleaned += buffer.substring(0, earliestIdx);
-          buffer = buffer.substring(earliestIdx);
-        }
-
-        // Check if closing tag is in the buffer
-        const closeIdx = buffer.indexOf(matchedClose);
-        if (closeIdx !== -1) {
-          // Both tags in buffer — remove the whole block
-          buffer = buffer.substring(closeIdx + matchedClose.length);
-        } else {
-          // Opening tag found but no closing yet — enter tag mode
-          inTag = true;
-          currentCloseTag = matchedClose;
-          buffer = buffer.substring(matchedOpen.length);
-          break;
-        }
-      }
-
-      return cleaned;
+      const newText = textParts.join('');
+      const newOutput = newText.substring(outputIdx);
+      outputIdx = newText.length;
+      return newOutput;
     },
 
     flush(): string {
-      return cleaned;
+      // For backward compat — returns cumulative (for non-streaming use)
+      processBuffer();
+      return textParts.join('');
     },
   };
 }
