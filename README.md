@@ -2,30 +2,24 @@
 
 **A local-first ADHD journaling app that helps you reflect, track moods, and build streaks — powered by AI, private by design.**
 
-Drift is a web-based journaling tool built for people with ADHD who want a simple, distraction-free space to write, reflect, and grow. All your data stays on your device using IndexedDB, and AI-powered features (via OpenRouter) help you gain insights into your patterns — without ever sending your journal entries to a server.
+Drift is a web-based journaling tool built for people with ADHD who want a simple, distraction-free space to write, reflect, and grow. Your journal is stored locally on your device using IndexedDB. When you use AI features, entry text is sent to OpenRouter and your chosen model provider.
 
 ---
 
 ## ✨ Features
 
-- 📝 **Journal Entries with Auto-Save Drafts** — Write freely without worrying about losing progress. Drafts are saved automatically as you type.
+- 📝 **Journal Entries with Auto-Save Drafts** — Write freely without worrying about losing progress. Drafts are saved automatically as you type and recovered on reload.
 - 🤖 **AI Reflections** — Get personalized reflections on your journal entries powered by OpenRouter AI models.
 - 🏷️ **Auto-Tagging** — Every entry is automatically tagged with topics, mood words, tasks, and people mentioned — powering smarter suggestions and summaries.
-- 😊 **Mood Tracking** — Log your mood alongside entries to visualize emotional patterns over time.
-- 🔥 **Streak System** — Build consistency with a streak tracker that encourages daily journaling.
+- 😊 **Mood Tracking** — Log your mood alongside entries to visualize emotional patterns over time. Mood history stays in sync when you edit or delete entries.
+- 🔥 **Streak System** — Build consistency with a streak tracker that forgives one missed day and preserves your longest streak even after a lapse.
 - 💬 **AI Coach Chat** — Chat with one of three AI coach personalities: **Coach**, **Listener**, or **Challenger** — each with a unique approach to helping you reflect.
 - 💡 **Topic Suggestions** — Never stare at a blank page again. AI-generated topic prompts tailored to your journaling history.
 - 📊 **Weekly Summary** — Get a brief overview of your week's themes and patterns, generated from your entry summaries.
-- 📱 **PWA Installable** — Install Drift on your phone or desktop for a native app experience.
+- 📱 **PWA Installable** — Install Drift on your phone or desktop for a native app experience with offline support.
 - 📦 **Data Export** — Export your journal data in JSON format for backup or migration.
 - 🌙 **Dark Theme with Accessible Colors** — A carefully designed dark UI with WCAG-compliant contrast ratios.
-- 🔒 **100% Local-First** — No servers, no accounts, no cloud storage. Your data lives on your device.
-
----
-
-## 📸 Screenshots
-
-> 📸 *Screenshots coming soon. Install Drift and try it yourself — it's the best way to experience it!*
+- 🔒 **Local-First** — Your journal is stored locally on this device. When you use AI features, entry text is sent to OpenRouter and your chosen model provider.
 
 ---
 
@@ -39,7 +33,8 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 | **Styling** | Tailwind CSS |
 | **Local Storage** | Dexie.js (IndexedDB) |
 | **AI Integration** | OpenRouter API |
-| **State Management** | React Context + Hooks |
+| **PWA** | vite-plugin-pwa + Workbox |
+| **State Management** | React Hooks |
 | **Routing** | React Router |
 
 ---
@@ -102,99 +97,6 @@ npm run preview
 
 ---
 
-## 🌐 Deployment
-
-Drift is a static web app — no backend server required. Deploy the `dist/` folder to any static hosting provider.
-
-### Option 1: Static Hosting (Vercel / Netlify / Cloudflare Pages)
-
-**Vercel:**
-
-```bash
-npm i -g vercel
-vercel
-```
-
-**Netlify:**
-
-1. Push your repo to GitHub.
-2. Connect the repo on [Netlify](https://app.netlify.com).
-3. Set the build command to `npm run build` and the publish directory to `dist`.
-4. Deploy.
-
-**Cloudflare Pages:**
-
-1. Push your repo to GitHub.
-2. Go to [Cloudflare Pages](https://pages.cloudflare.com) and connect your repo.
-3. Set the build command to `npm run build` and the output directory to `dist`.
-4. Deploy.
-
-### Option 2: Self-Hosting with Nginx
-
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-    root /var/www/drift/dist;
-    index index.html;
-
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # Cache static assets
-    location /assets/ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-}
-```
-
-Then reload Nginx:
-
-```bash
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-### Option 3: Self-Hosting with Caddy
-
-```Caddyfile
-your-domain.com {
-    root * /var/www/drift/dist
-    file_server
-    try_files {path} /index.html
-}
-```
-
-### Option 4: Docker Deployment
-
-Create a `Dockerfile`:
-
-```dockerfile
-FROM node:18-alpine AS build
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-
-FROM nginx:alpine
-COPY --from=build /app/dist /usr/share/nginx/html
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
-```
-
-Build and run:
-
-```bash
-docker build -t drift .
-docker run -d -p 8080:80 drift
-```
-
-The app will be available at **http://localhost:8080**.
-
----
-
 ## ⚙️ Configuration
 
 ### API Key Setup
@@ -205,7 +107,7 @@ Drift uses [OpenRouter](https://openrouter.ai/) for AI features. You need to pro
 2. Generate an API key at [openrouter.ai/keys](https://openrouter.ai/keys).
 3. Enter the key in Drift's **onboarding wizard** or **Settings** page.
 
-> 🔒 Your API key is stored locally in IndexedDB and never leaves your device.
+> 🔒 Your API key is stored locally in IndexedDB. When you use AI features, it is sent to OpenRouter to authenticate requests.
 
 ### Model Selection
 
@@ -216,15 +118,13 @@ Drift ships with two AI model slots, both configurable in Settings:
 | **Primary** | `anthropic/claude-sonnet-5` | AI Coach chat, reflections, topic suggestions | temp 0.7, max 1000 tokens |
 | **Background** | `deepseek/deepseek-v4-flash` | Entry tagging, weekly summaries | temp 0.2, max 600 tokens |
 
-The defaults were chosen via a blind five-model comparison test (Claude Sonnet 5, Grok 4.3, Kimi K2.6, DeepSeek V4 Flash, Gemini 3.5 Flash) scored on warmth, brevity, format obedience, epistemic honesty, and hallucination resistance. Claude Sonnet 5 won across all scenarios; Gemini 3.5 Flash placed last despite the highest benchmark scores — it fabricated a weekday calendar from dates alone.
-
 You can override both models in **Settings**. Per-function parameters (temperature, max tokens) are baked into the app design and not user-configurable.
 
 ### Entry Tagging & Weekly Summary
 
-When you save an entry, Drift automatically extracts structured data (topics, mood words, tasks, people) using the background model. This data powers topic suggestions and the weekly summary without re-sending your raw entry text.
+When you save an entry, Drift automatically extracts structured data (topics, mood words, tasks, people) using the background model. Entry text is sent to OpenRouter for this processing. If tagging fails, the status is tracked on the entry and you can retry from the entry card.
 
-The **Weekly summary** (available on the Dashboard) aggregates your recent entry summaries into a brief overview. Pattern claims always cite the entry dates that support them — Drift never infers data it doesn't have.
+The **Weekly summary** (available on the Dashboard) aggregates your recent entry summaries into a brief overview.
 
 ### AI Coach Personalities
 
@@ -240,18 +140,11 @@ Drift offers three AI coach personalities, each with a distinct communication st
 
 ## 🔐 Data Privacy
 
-> **Your data stays on your device.**
-
-Drift is built on a **local-first** architecture:
-
 - **All journal entries, mood logs, sessions, streak data, and AI-generated tags** are stored in your browser's IndexedDB via Dexie.js.
-- **No data is sent to any server** — not even to us.
+- **When you use AI features**, your current entry text is sent to OpenRouter and the selected model provider. This includes reflections, auto-tagging, topic suggestions, coach chat context, and weekly summaries.
 - **No user accounts, no tracking, no analytics.**
-- **AI features** send your current entry text to OpenRouter for processing. Topic Suggestions and Weekly Summary send locally-generated summaries of your recent entries (not raw entry text). Your full journal history is never transmitted.
 - Every OpenRouter request includes `provider: { data_collection: "deny" }` to ensure your data is not used for model training.
 - **Data export** lets you download everything as JSON for backup or migration.
-
-You are in full control of your data at all times.
 
 ---
 
@@ -259,42 +152,11 @@ You are in full control of your data at all times.
 
 Contributions are welcome! Whether it's a bug report, feature request, or pull request — we'd love your help.
 
-### How to Contribute
-
 1. **Fork** the repository.
-2. **Create a branch** for your feature or fix:
-
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-3. **Make your changes** and ensure the app builds without errors:
-
-   ```bash
-   npm run build
-   ```
-
-4. **Commit** your changes with a clear message:
-
-   ```bash
-   git commit -m "feat: add new feature description"
-   ```
-
-5. **Push** to your fork and open a **Pull Request**.
-
-### Guidelines
-
-- Follow the existing code style (TypeScript, Tailwind CSS).
-- Keep PRs focused — one feature or fix per PR.
-- Write clear commit messages following [Conventional Commits](https://www.conventionalcommits.org/).
-- Test your changes on both mobile and desktop viewports.
-
-### Reporting Issues
-
-Open an issue on GitHub with:
-- A clear title and description.
-- Steps to reproduce (if applicable).
-- Screenshots or screen recordings (if applicable).
+2. **Create a branch** for your feature or fix.
+3. **Make your changes** and ensure `npm run build` passes.
+4. **Commit** with a clear message following [Conventional Commits](https://www.conventionalcommits.org/).
+5. **Push** and open a **Pull Request**.
 
 ---
 
@@ -306,13 +168,66 @@ This project is licensed under the **MIT License**.
 
 ## 📋 Recent Changes
 
-- **Word count display fix** — Entry cards now show "361 words" instead of ambiguous "361w" which was being misread as "361 weeks". Applied to JournalPage and EntriesPage; Dashboard already displayed the full word.
-- **UTC→local date fix** — Streak and mood calculations now use your local timezone instead of UTC, so daily streaks reset at midnight in your time.
-- **CoachPage stale closure fix** — Fixed double-session creation and improved unmount cleanup when switching between coach modes.
-- **Race condition fix** — `addMessageToSession` no longer races with concurrent calls.
-- **Onboarding defaults** — New users see recommended models (Claude Sonnet 5 primary, DeepSeek V4 Flash background) out of the box.
-- **EntriesPage streaming fix** — Reflection requests now correctly pass the `REQUEST_CONFIG.reflect` parameter.
-- **SettingsPage performance** — Added `useCallback` to prevent unnecessary re-renders.
+### v0.2.0 — Comprehensive Bug Fix Release
+
+Major bug fix pass based on a 4-round code review by GPT-5.6-Terra. 18 bugs fixed + 6 edge cases resolved.
+
+**Critical fixes:**
+- **Streaming AI output corrupted** — All streamed responses had spaces stripped between words. Fixed by removing `.trim()` from per-chunk processing.
+- **Prompt injection via journal entries** — Journal context was sent as `role: 'system'`, giving user text system-level authority. Changed to `role: 'user'` with explicit delimiters and anti-injection instructions.
+- **Draft/save race condition** — Auto-save and manual Save could create duplicate drafts. Now uses a serialized promise chain and finalizes drafts in-place.
+- **Drafts inflated all stats** — Drafts were included in entry counts, word totals, streaks, and coach context. All queries now filter `isDraft`.
+- **Deleting entries left orphaned data** — Tags, moods, and sessions were not cleaned up. Now uses cascading Dexie transactions.
+- **Mood history out of sync** — Editing or deleting entries didn't update mood records. Now synced transactionally.
+
+**High fixes:**
+- Dashboard "Total entries" now uses full database, not just last 20
+- Coach session end now cancels in-flight AI streams
+- Separate abort controllers per operation (no more cross-interference)
+- Auto-tagging errors tracked on entries with retry path
+- Service worker replaced with vite-plugin-pwa (precaches all hashed bundles)
+- Achievements now actually awarded on save
+
+**Edge cases resolved:**
+- Streak forgiveness limited to one missed day per streak (was unlimited)
+- Longest streak preserved even after current streak lapses
+- Mood chart 30-day range now inclusive (was off-by-one)
+- DST-safe date calculations for streak tracking
+- Stateful reasoning-tag filter handles tags spanning multiple stream chunks
+- Drafts recovered on app reload
+- Tag resurrection after deletion prevented via transactional existence check
+- Reward awards made atomic with backward-compatible lookup
+- Settings toggles have proper accessibility attributes
+- Privacy claims updated to accurately reflect AI data usage
+
+**Infrastructure:**
+- PWA upgraded from handwritten `sw.js` to `vite-plugin-pwa` with Workbox
+- DB schema v3: `entryTags.entryId` as primary key (prevents duplicate tags)
+- New `taggingStatus`/`taggingError` fields on entries
+
+### Upgrade Notes (v0.1.x → v0.2.0)
+
+> ⚠️ **Database migration is automatic** — Dexie handles schema upgrades transparently. No data loss.
+
+**What changes:**
+1. **PWA service worker** — The old handwritten `sw.js` is replaced by Workbox-generated service workers. After updating, your browser may cache the old service worker briefly. To force the update:
+   - Open Drift → DevTools → Application → Service Workers → "Unregister"
+   - Or hard-refresh (Ctrl+Shift+R / Cmd+Shift+R)
+   - The new SW will activate on next load
+
+2. **Reward records** — New rewards use the reward `type` as the primary key instead of random UUIDs. Existing rewards (from v0.1.x) with UUID keys will still display correctly. New awards will not duplicate existing ones even if the old UUID record exists.
+
+3. **Entry tags** — The `entryTags` table schema changed from `id` primary key to `entryId` primary key. Dexie auto-migrates, but if you had duplicate tag records for the same entry (possible in v0.1.x due to a bug), only one will survive the migration.
+
+4. **Personality storage** — Personality is now read from IndexedDB instead of localStorage. If you previously set a personality, it was already saved to IndexedDB by Settings. No action needed.
+
+5. **Service worker precache** — The PWA now properly precaches all build assets (JS, CSS, fonts). First load after update may re-download all assets. Subsequent loads will be fully offline-capable.
+
+**What to check after upgrading:**
+- Streak counter may show different numbers (fixed forgiveness logic — was counting every-other-day indefinitely as a streak)
+- Dashboard total entries/words should now be accurate (was capped at 20)
+- Existing drafts will be restored to the journal editor on first load
+- AI streaming responses should display with proper spacing (was previously corrupted)
 
 ---
 
