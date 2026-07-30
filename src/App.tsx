@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import JournalPage from './pages/JournalPage';
 import EntriesPage from './pages/EntriesPage';
+import TasksPage from './pages/TasksPage';
 import CoachPage from './pages/CoachPage';
 import DashboardPage from './pages/DashboardPage';
 import SettingsPage from './pages/SettingsPage';
@@ -13,6 +14,7 @@ function Sidebar() {
 
   const links = [
     { to: '/', label: 'Journal', icon: '📝' },
+    { to: '/tasks', label: 'Tasks', icon: '✅' },
     { to: '/entries', label: 'Entries', icon: '📚' },
     { to: '/coach', label: 'Coach', icon: '🤖' },
     { to: '/dashboard', label: 'Dashboard', icon: '📊' },
@@ -146,6 +148,7 @@ export default function App() {
       <Layout>
         <Routes>
           <Route path="/" element={<JournalPage />} />
+          <Route path="/tasks" element={<TasksPage />} />
           <Route path="/entries" element={<EntriesPage />} />
           <Route path="/coach" element={<CoachPage />} />
           <Route path="/dashboard" element={<DashboardPage />} />

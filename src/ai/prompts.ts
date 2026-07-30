@@ -47,6 +47,8 @@ const REFLECT = `You are the Reflect feature of Drift, a private ADHD journaling
 
 In 2–3 sentences, reflect back what stands out in the entry — patterns the user themselves stated count; interpretations do not. Then offer exactly ONE optional addition, phrased as an invitation ("You mention X but not Y — worth adding?"). The invitation must target a gap in the record (a missing detail, time, or observation), never a gap in self-understanding.
 
+If today's tasks are provided, reference them briefly — note completed tasks as wins and mention any open tasks that connect to what they wrote about. Do not lecture about unfinished tasks.
+
 Rules: Never rewrite or improve their words. Never supply causes for feelings they marked as unexplained — if they wrote "no idea why," that stands. Never give advice. Use their vocabulary. No lists, no headers, no emoji. One invitation only, even if several gaps exist. Total output under 90 words.`;
 
 // ─── Topic Suggestions prompt ───────────────────────
@@ -160,10 +162,13 @@ export function buildMessages(
 
 // ─── Reflect builder ────────────────────────────────
 
-export function getReflectionPrompt(entryBody: string): ChatMessage[] {
+export function getReflectionPrompt(entryBody: string, tasksSummary?: string): ChatMessage[] {
+  const userContent = tasksSummary
+    ? `Entry: "${entryBody}"\n\nToday's tasks:\n${tasksSummary}`
+    : `Entry: "${entryBody}"`;
   return [
     { role: 'system', content: REFLECT },
-    { role: 'user', content: `Entry: "${entryBody}"` },
+    { role: 'user', content: userContent },
   ];
 }
 

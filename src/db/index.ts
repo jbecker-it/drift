@@ -62,6 +62,15 @@ export interface AppSettings {
   value: string;
 }
 
+export interface Task {
+  id: string;
+  text: string;
+  date: string; // YYYY-MM-DD — tasks are per-day
+  done: boolean;
+  createdAt: string;
+  doneAt?: string;
+}
+
 // ─── Database ────────────────────────────────────────
 
 class DriftDB extends Dexie {
@@ -70,6 +79,7 @@ class DriftDB extends Dexie {
   sessions!: Table<ChatSession>;
   rewards!: Table<Reward>;
   moods!: Table<MoodEntry>;
+  tasks!: Table<Task>;
   settings!: Table<AppSettings>;
 
   constructor() {
@@ -87,6 +97,10 @@ class DriftDB extends Dexie {
     // v3: make entryId unique in entryTags to prevent duplicates
     this.version(3).stores({
       entryTags: 'entryId, taggedAt',
+    });
+    // v4: add tasks table for daily task tracking
+    this.version(4).stores({
+      tasks: 'id, date, done',
     });
   }
 }
@@ -458,6 +472,7 @@ export async function clearAllData(): Promise<void> {
   await db.sessions.clear();
   await db.rewards.clear();
   await db.moods.clear();
+  await db.tasks.clear();
   await db.settings.clear();
 }
 
@@ -490,4 +505,54 @@ export async function getEntrySummaries(limit: number = 14): Promise<string[]> {
   return tags
     .filter(t => t.one_line_summary)
     .map(t => `[${t.taggedAt.split('T')[0]}] ${t.one_line_summary}`);
+}
+
+// ─── Task helpers ────────────────────────────────────
+
+/** Add a task for today. */
+export async function addTask(text: string): Promise<Task> {
+  const task: Task = {
+    id: uuid(),
+    text,
+    date: localDateKey(),
+    done: false,
+    createdAt: new Date().toISOString(),
+  };
+  await db.tasks.add(task);
+  return task;
+}
+
+/** Toggle a task's done status. */
+export async function toggleTask(id: string): Promise<void> {
+  const task = await db.tasks.get(id);
+  if (!task) return;
+  await db.tasks.update(id, {
+    done: !task.done,
+    doneAt: !task.done ? new Date().toISOString() : undefined,
+  });
+}
+
+/** Delete a task. */
+export async function deleteTask(id: string): Promise<void> {
+  await db.tasks.delete(id);
+}
+
+/** Get today's tasks. */
+export async function getTodaysTasks(): Promise<Task[]> {
+  const today = localDateKey();
+  return db.tasks.where('date').equals(today).toArray();
+}
+
+/** Get tasks for a specific date. */
+export async function getTasksForDate(date: string): Promise<Task[]> {
+  return db.tasks.where('date').equals(date).toArray();
+}
+
+/** Get a summary of today's tasks for AI context. */
+export async function getTodayTasksSummary(): Promise<string> {
+  const tasks = await getTodaysTasks();
+  if (tasks.length === 0) return '';
+  const done = tasks.filter(t => t.done).map(t => `✓ ${t.text}`);
+  const open = tasks.filter(t => !t.done).map(t => `○ ${t.text}`);
+  return [...open, ...done].join('\n');
 }

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   saveEntry, saveDraft, finalizeDraft, getRecentEntries, logMood, updateEntry, deleteEntry, db,
   awardReward,
+  getTodaysTasks, addTask, toggleTask, getTodayTasksSummary, type Task,
   type JournalEntry,
 } from '../db';
 import { streamChat } from '../ai/openrouter';
@@ -42,6 +43,10 @@ export default function JournalPage() {
   const [expandedEntry, setExpandedEntry] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
+  // ─── Today's tasks ─────────────────────────────────
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [newTaskText, setNewTaskText] = useState('');
+
   // ─── Post-save reflection state ────────────────────
   const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
   const [reflection, setReflection] = useState('');
@@ -73,7 +78,15 @@ export default function JournalPage() {
     setRecentEntries(entries);
   }, []);
 
-  useEffect(() => { loadEntries(); }, [loadEntries]);
+  const loadTasks = useCallback(async () => {
+    const today = await getTodaysTasks();
+    setTasks(today.sort((a, b) => {
+      if (a.done !== b.done) return a.done ? 1 : -1;
+      return a.createdAt.localeCompare(b.createdAt);
+    }));
+  }, []);
+
+  useEffect(() => { loadEntries(); loadTasks(); }, [loadEntries, loadTasks]);
 
   // Recover any existing draft on mount
   useEffect(() => {
@@ -128,7 +141,8 @@ export default function JournalPage() {
       reflectAbortRef.current?.abort();
       reflectAbortRef.current = new AbortController();
 
-      const messages = getReflectionPrompt(entryBody);
+      const tasksSummary = await getTodayTasksSummary();
+      const messages = getReflectionPrompt(entryBody, tasksSummary || undefined);
       let result = '';
       for await (const chunk of streamChat(messages, { apiKey, model }, reflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
@@ -239,7 +253,8 @@ export default function JournalPage() {
       reflectAbortRef.current?.abort();
       reflectAbortRef.current = new AbortController();
 
-      const messages = getReflectionPrompt(body);
+      const tasksSummary = await getTodayTasksSummary();
+      const messages = getReflectionPrompt(body, tasksSummary || undefined);
       let result = '';
       for await (const chunk of streamChat(messages, { apiKey, model }, reflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
@@ -283,7 +298,8 @@ export default function JournalPage() {
       savedReflectAbortRef.current?.abort();
       savedReflectAbortRef.current = new AbortController();
 
-      const messages = getReflectionPrompt(entry.body);
+      const tasksSummary = await getTodayTasksSummary();
+      const messages = getReflectionPrompt(entry.body, tasksSummary || undefined);
       let result = '';
       for await (const chunk of streamChat(messages, { apiKey, model }, savedReflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
@@ -382,6 +398,75 @@ export default function JournalPage() {
           )}
         </div>
       )}
+
+      {/* ─── Today's tasks ─────────────────────────── */}
+      <div className="bg-bg-card border border-border rounded-xl p-4">
+        <h3 className="text-sm font-medium text-text-secondary mb-3">✅ Today's tasks</h3>
+
+        {/* Task list */}
+        {tasks.length > 0 && (
+          <div className="space-y-1.5 mb-3">
+            {tasks.map(task => (
+              <label
+                key={task.id}
+                className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
+                  task.done ? 'opacity-50' : 'hover:bg-bg-hover'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={task.done}
+                  onChange={async () => { await toggleTask(task.id); await loadTasks(); }}
+                  className="w-4 h-4 rounded border-border text-accent-green focus:ring-accent-green"
+                />
+                <span className={`text-sm ${task.done ? 'text-text-dim line-through' : 'text-text-primary'}`}>
+                  {task.text}
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+
+        {/* Add task inline */}
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={newTaskText}
+            onChange={(e) => setNewTaskText(e.target.value)}
+            onKeyDown={async (e) => {
+              if (e.key === 'Enter' && newTaskText.trim()) {
+                e.preventDefault();
+                await addTask(newTaskText.trim());
+                setNewTaskText('');
+                await loadTasks();
+              }
+            }}
+            placeholder={tasks.length === 0 ? 'Add a task for today...' : 'Add another task...'}
+            className="flex-1 px-3 py-2 bg-transparent text-sm text-text-primary
+                       placeholder:text-text-dim focus:outline-none"
+          />
+          {newTaskText.trim() && (
+            <button
+              onClick={async () => {
+                await addTask(newTaskText.trim());
+                setNewTaskText('');
+                await loadTasks();
+              }}
+              className="text-xs text-accent-green hover:text-accent-green/80 transition-colors shrink-0"
+            >
+              + Add
+            </button>
+          )}
+        </div>
+
+        {tasks.length > 0 && (
+          <div className="mt-2 pt-2 border-t border-border">
+            <span className="text-xs text-text-dim">
+              {tasks.filter(t => t.done).length}/{tasks.length} done
+            </span>
+          </div>
+        )}
+      </div>
 
       {/* Editor */}
       <div className="bg-bg-card border border-border rounded-xl overflow-hidden">
