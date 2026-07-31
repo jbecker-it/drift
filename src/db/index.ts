@@ -116,7 +116,7 @@ class DriftDB extends Dexie {
     });
     // v4: add tasks table for daily task tracking
     this.version(4).stores({
-      tasks: 'id, date, done',
+      tasks: 'id, date, done, entryId',
     });
     // v5: add context memory for rolling user profile
     this.version(5).stores({
@@ -227,11 +227,13 @@ export async function deleteEntry(id: string): Promise<void> {
     db.entryTags,
     db.moods,
     db.sessions,
+    db.tasks,
     async () => {
       await db.entries.delete(id);
       await db.entryTags.where('entryId').equals(id).delete();
       await db.moods.where('entryId').equals(id).delete();
       await db.sessions.where('entryId').equals(id).delete();
+      await db.tasks.where('entryId').equals(id).delete();
     },
   );
 }
@@ -481,6 +483,8 @@ export async function exportAllData(): Promise<string> {
     sessions: await db.sessions.toArray(),
     rewards: await db.rewards.toArray(),
     moods: await db.moods.toArray(),
+    tasks: await db.tasks.toArray(),
+    contextMemory: await db.contextMemory.toArray(),
     exportedAt: new Date().toISOString(),
   };
   return JSON.stringify(data, null, 2);
@@ -492,6 +496,8 @@ export async function clearAllData(): Promise<void> {
   await db.sessions.clear();
   await db.rewards.clear();
   await db.moods.clear();
+  await db.tasks.clear();
+  await db.contextMemory.clear();
   await db.tasks.clear();
   await db.settings.clear();
 }
@@ -520,11 +526,17 @@ export async function getEntrySummaries(limit: number = 14): Promise<string[]> {
   const tags = await db.entryTags
     .orderBy('taggedAt')
     .reverse()
-    .limit(limit)
+    .limit(limit * 2)
     .toArray();
-  return tags
-    .filter(t => t.one_line_summary)
-    .map(t => `[${t.taggedAt.split('T')[0]}] ${t.one_line_summary}`);
+  const results: string[] = [];
+  for (const tag of tags) {
+    if (!tag.one_line_summary) continue;
+    const entry = await db.entries.get(tag.entryId);
+    const date = entry ? entry.created.split('T')[0] : tag.taggedAt.split('T')[0];
+    results.push(`[${date}] ${tag.one_line_summary}`);
+    if (results.length >= limit) break;
+  }
+  return results;
 }
 
 // ─── Task helpers ────────────────────────────────────
@@ -544,11 +556,9 @@ export async function addTask(text: string): Promise<Task> {
 
 /** Toggle a task's done status. */
 export async function toggleTask(id: string): Promise<void> {
-  const task = await db.tasks.get(id);
-  if (!task) return;
-  await db.tasks.update(id, {
-    done: !task.done,
-    doneAt: !task.done ? new Date().toISOString() : undefined,
+  await db.tasks.where('id').equals(id).modify(task => {
+    task.done = !task.done;
+    task.doneAt = task.done ? new Date().toISOString() : undefined;
   });
 }
 

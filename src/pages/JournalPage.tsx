@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   saveEntry, saveDraft, finalizeDraft, getRecentEntries, logMood, updateEntry, deleteEntry, db,
   awardReward,
-  getTodaysTasks, addTask, toggleTask, getTodayTasksSummary,
+  getTodaysTasks, addTask, toggleTask, deleteTask, getTodayTasksSummary,
   getEntrySummaries, extractTasksFromTags, type Task,
   type JournalEntry,
 } from '../db';
@@ -147,7 +147,11 @@ export default function JournalPage() {
       const [tasksSummary, contextMemory, recentSummaries] = await Promise.all([
         getTodayTasksSummary(),
         getContextMemoryPrompt(),
-        getEntrySummaries(3).then(s => s.length > 0 ? s.join('\n') : undefined),
+        getEntrySummaries(5).then(summaries => {
+          // Exclude entries that match this entry's first 50 chars to avoid duplication
+          const filtered = summaries.filter(s => !s.includes(entryBody.substring(0, 50)));
+          return filtered.length > 0 ? filtered.slice(0, 3).join('\n') : undefined;
+        }),
       ]);
 
       const messages = getReflectionPrompt(
@@ -191,6 +195,12 @@ export default function JournalPage() {
           mood,
           wordCount: body.split(/\s+/).filter(Boolean).length,
         });
+        // Re-tag the entry with updated content
+        const editEntry = { id: entryId, body, created: new Date().toISOString(), isDraft: false, wordCount: body.split(/\s+/).filter(Boolean).length };
+        tagEntry(editEntry).then(async () => {
+          await extractTasksFromTags(editEntry as JournalEntry);
+          await loadTasks();
+        }).catch(() => {});
       } else {
         // New entry
         let entry: JournalEntry;
@@ -213,12 +223,13 @@ export default function JournalPage() {
           // After tagging completes, extract tasks from the tags
           await extractTasksFromTags(entryForTagging as JournalEntry);
           await loadTasks();
-        });
+        }).catch(() => {}); // Background job — fail silently
 
-        // Fire-and-forget: refresh context memory if needed
-        shouldRefreshContext().then(shouldRefresh => {
-          if (shouldRefresh) refreshContextMemory();
-        });
+        // Context refresh: run after tagging completes to include this entry
+        tagEntry(entryForTagging).then(async () => {
+          const shouldRefresh = await shouldRefreshContext();
+          if (shouldRefresh) await refreshContextMemory();
+        }).catch(() => {});
 
         // Award achievements (#12)
         const totalEntries = (await db.entries.toArray()).filter(e => !e.isDraft).length;
@@ -325,12 +336,15 @@ export default function JournalPage() {
       savedReflectAbortRef.current?.abort();
       savedReflectAbortRef.current = new AbortController();
 
-      const [tasksSummary, contextMemory, recentSummaries] = await Promise.all([
-        getTodayTasksSummary(),
+      // For historical entries, skip today's tasks (they're unrelated)
+      const [contextMemory, recentSummaries] = await Promise.all([
         getContextMemoryPrompt(),
-        getEntrySummaries(3).then(s => s.length > 0 ? s.join('\n') : undefined),
+        getEntrySummaries(5).then(summaries => {
+          const filtered = summaries.filter(s => !s.includes(entry.body.substring(0, 50)));
+          return filtered.length > 0 ? filtered.slice(0, 3).join('\n') : undefined;
+        }),
       ]);
-      const messages = getReflectionPrompt(entry.body, tasksSummary || undefined, contextMemory || undefined, recentSummaries);
+      const messages = getReflectionPrompt(entry.body, undefined, contextMemory || undefined, recentSummaries);
       let result = '';
       for await (const chunk of streamChat(messages, { apiKey, model }, savedReflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
@@ -450,9 +464,16 @@ export default function JournalPage() {
                   onChange={async () => { await toggleTask(task.id); await loadTasks(); }}
                   className="w-4 h-4 rounded border-border text-accent-green focus:ring-accent-green"
                 />
-                <span className={`text-sm ${task.done ? 'text-text-dim line-through' : 'text-text-primary'}`}>
+                <span className={`flex-1 text-sm ${task.done ? 'text-text-dim line-through' : 'text-text-primary'}`}>
                   {task.text}
                 </span>
+                <button
+                  onClick={async (e) => { e.preventDefault(); await deleteTask(task.id); await loadTasks(); }}
+                  className="text-text-dim hover:text-red-400 transition-colors text-xs shrink-0"
+                  aria-label={`Delete task "${task.text}"`}
+                >
+                  ✕
+                </button>
               </label>
             ))}
           </div>

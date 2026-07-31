@@ -108,13 +108,22 @@ export async function refreshContextMemory(): Promise<void> {
     const cleaned = raw.replace(/^```json?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
     const parsed: ContextRefreshResult = JSON.parse(cleaned);
 
+    // Validate output — ensure arrays are arrays of strings
+    const validated = {
+      patterns: Array.isArray(parsed.patterns) ? parsed.patterns.filter((x: any) => typeof x === 'string').slice(0, 10) : [],
+      keyFacts: Array.isArray(parsed.keyFacts) ? parsed.keyFacts.filter((x: any) => typeof x === 'string').slice(0, 10) : [],
+      openLoops: Array.isArray(parsed.openLoops) ? parsed.openLoops.filter((x: any) => typeof x === 'string').slice(0, 10) : [],
+      recentWins: Array.isArray(parsed.recentWins) ? parsed.recentWins.filter((x: any) => typeof x === 'string').slice(0, 10) : [],
+      moodTrend: typeof parsed.moodTrend === 'string' ? parsed.moodTrend : '',
+    };
+
     // Save updated memory
     await saveContextMemory({
-      patterns: parsed.patterns ?? [],
-      keyFacts: parsed.keyFacts ?? [],
-      openLoops: parsed.openLoops ?? [],
-      recentWins: parsed.recentWins ?? [],
-      moodTrend: parsed.moodTrend ?? '',
+      patterns: validated.patterns,
+      keyFacts: validated.keyFacts,
+      openLoops: validated.openLoops,
+      recentWins: validated.recentWins,
+      moodTrend: validated.moodTrend,
       lastUpdated: new Date().toISOString(),
       entryCount: summaries.length,
     });
