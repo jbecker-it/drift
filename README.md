@@ -9,9 +9,11 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 ## ✨ Features
 
 - 📝 **Journal Entries with Auto-Save Drafts** — Write freely without worrying about losing progress. Drafts are saved automatically as you type and recovered on reload.
-- 🤖 **AI Reflections** — Get personalized reflections on your journal entries powered by OpenRouter AI models.
-- 🏷️ **Auto-Tagging** — Every entry is automatically tagged with topics, mood words, tasks, and people mentioned — powering smarter suggestions and summaries.
-- 😊 **Mood Tracking** — Log your mood alongside entries to visualize emotional patterns over time. Mood history stays in sync when you edit or delete entries.
+- 🧠 **Context Memory** — Drift builds a rolling profile of you (patterns, key facts, open loops, recent wins, mood trend) that makes AI reflections feel personal instead of generic. Refreshed every ~5 entries by the background model.
+- 🤖 **AI Reflections** — Get personalized reflections powered by your context memory, today's tasks, recent entry summaries, and current entry — all in one prompt.
+- ✅ **Daily Tasks** — Add tasks for today, tick them off while journaling. Tasks are also auto-extracted from your entries by the background model.
+- 🏷️ **Auto-Tagging** — Every entry is automatically tagged with topics, mood words, tasks, and people mentioned. Extracted tasks are promoted to your task list.
+- 😊 **Mood Tracking** — Log your mood alongside entries to visualize emotional patterns over time.
 - 🔥 **Streak System** — Build consistency with a streak tracker that forgives one missed day and preserves your longest streak even after a lapse.
 - 💬 **AI Coach Chat** — Chat with one of three AI coach personalities: **Coach**, **Listener**, or **Challenger** — each with a unique approach to helping you reflect.
 - 💡 **Topic Suggestions** — Never stare at a blank page again. AI-generated topic prompts tailored to your journaling history.
@@ -168,6 +170,38 @@ This project is licensed under the **MIT License**.
 
 ## 📋 Recent Changes
 
+### v0.3.0 — Context Memory + Enhanced Reflection + Tasks
+
+Major feature release: the app now remembers you across sessions and reflects with full context.
+
+**🧠 Context Memory (the core upgrade)**
+- New `contextMemory` table stores a rolling profile: patterns, key facts, open loops, recent wins, mood trend
+- Background refresh via DeepSeek Flash every ~5 entries (fire-and-forget)
+- Analyzes tagged summaries + recent entry full text, merges incrementally
+- Profile validated on save (array types, length limits)
+
+**✅ Daily Tasks**
+- Tasks page for managing today's tasks (add, complete, delete)
+- Inline task checkboxes on the Journal page
+- Tasks auto-extracted from journal entries via background tagging (`tasks_open`/`tasks_done`)
+- Per-day reset — each morning starts fresh
+
+**🔗 Enhanced Reflection Prompt**
+- Reflection now includes: context memory + last 3 entry summaries + today's tasks + current entry
+- Data injected via `<context_memory>`, `<recent_entries>`, `<today_tasks>`, `<current_entry>` delimiters
+- Anti-injection instruction in system prompt
+
+**Bug fixes from review**
+- Tasks table indexes `entryId` (DB v6 migration)
+- Single `tagEntry` call chains extraction + refresh (no duplicate API calls)
+- `deleteEntry` cascades to tasks
+- `toggleTask` uses atomic Dexie `modify()`
+- Historical reflection skips today's tasks
+- Reflection excludes current entry from summaries (case-insensitive prefix match)
+- Context memory output validated (array types, limits: patterns:5, keyFacts:8, openLoops:5, wins:5)
+- `clearAllData` and `exportAllData` include tasks + contextMemory
+- Re-tag on edit uses original entry date, clears old extracted tasks
+
 ### v0.2.0 — Comprehensive Bug Fix Release
 
 Major bug fix pass based on a 4-round code review by GPT-5.6-Terra. 18 bugs fixed + 6 edge cases resolved.
@@ -204,6 +238,22 @@ Major bug fix pass based on a 4-round code review by GPT-5.6-Terra. 18 bugs fixe
 - PWA upgraded from handwritten `sw.js` to `vite-plugin-pwa` with Workbox
 - DB schema v3: `entryTags.entryId` as primary key (prevents duplicate tags)
 - New `taggingStatus`/`taggingError` fields on entries
+
+### Upgrade Notes (v0.2.x → v0.3.0)
+
+> ⚠️ **Database migration is automatic** — Dexie handles schema upgrades transparently. No data loss.
+
+**What changes:**
+1. **DB schema v6** — `tasks` table gains an `entryId` index. Auto-migrated.
+2. **New `contextMemory` table** — Starts empty, populated after ~5 entries with AI-generated profile.
+3. **Enhanced reflection** — Reflections now reference your history, tasks, and patterns. They'll be longer and more specific.
+4. **Auto-extracted tasks** — Entries mentioning tasks will now populate your task list automatically.
+5. **Reflection prompt size** — Reflections now send more context (memory + summaries + tasks), so they use slightly more tokens.
+
+**What to check after upgrading:**
+- Context memory starts empty — write ~5 entries and it will build automatically
+- Tasks page may show auto-extracted tasks from recent entries
+- Reflections should feel more personal and specific
 
 ### Upgrade Notes (v0.1.x → v0.2.0)
 
