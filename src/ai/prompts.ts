@@ -162,13 +162,26 @@ export function buildMessages(
 
 // ─── Reflect builder ────────────────────────────────
 
-export function getReflectionPrompt(entryBody: string, tasksSummary?: string): ChatMessage[] {
-  const userContent = tasksSummary
-    ? `Entry: "${entryBody}"\n\nToday's tasks:\n${tasksSummary}`
-    : `Entry: "${entryBody}"`;
+export function getReflectionPrompt(entryBody: string, tasksSummary?: string, contextMemory?: string, recentSummaries?: string): ChatMessage[] {
+  const parts: string[] = [];
+
+  if (contextMemory) {
+    parts.push(`Context about this person from their journal:\n${contextMemory}`);
+  }
+
+  if (recentSummaries) {
+    parts.push(`Recent entries:\n${recentSummaries}`);
+  }
+
+  if (tasksSummary) {
+    parts.push(`Today's tasks:\n${tasksSummary}`);
+  }
+
+  parts.push(`Entry:\n"${entryBody}"`);
+
   return [
     { role: 'system', content: REFLECT },
-    { role: 'user', content: userContent },
+    { role: 'user', content: parts.join('\n\n') },
   ];
 }
 

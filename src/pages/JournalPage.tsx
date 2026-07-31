@@ -2,12 +2,14 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   saveEntry, saveDraft, finalizeDraft, getRecentEntries, logMood, updateEntry, deleteEntry, db,
   awardReward,
-  getTodaysTasks, addTask, toggleTask, getTodayTasksSummary, type Task,
+  getTodaysTasks, addTask, toggleTask, getTodayTasksSummary,
+  getEntrySummaries, extractTasksFromTags, type Task,
   type JournalEntry,
 } from '../db';
 import { streamChat } from '../ai/openrouter';
 import { getReflectionPrompt, buildMessages, REQUEST_CONFIG } from '../ai/prompts';
 import { tagEntry } from '../ai/tagging';
+import { shouldRefreshContext, refreshContextMemory, getContextMemoryPrompt } from '../ai/context';
 import { getModel, getApiKey } from '../db';
 
 const MOODS = [
@@ -141,8 +143,19 @@ export default function JournalPage() {
       reflectAbortRef.current?.abort();
       reflectAbortRef.current = new AbortController();
 
-      const tasksSummary = await getTodayTasksSummary();
-      const messages = getReflectionPrompt(entryBody, tasksSummary || undefined);
+      // Build enhanced context for reflection
+      const [tasksSummary, contextMemory, recentSummaries] = await Promise.all([
+        getTodayTasksSummary(),
+        getContextMemoryPrompt(),
+        getEntrySummaries(3).then(s => s.length > 0 ? s.join('\n') : undefined),
+      ]);
+
+      const messages = getReflectionPrompt(
+        entryBody,
+        tasksSummary || undefined,
+        contextMemory || undefined,
+        recentSummaries,
+      );
       let result = '';
       for await (const chunk of streamChat(messages, { apiKey, model }, reflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
@@ -195,7 +208,17 @@ export default function JournalPage() {
         setActiveEntryId(entryId);
 
         // Fire-and-forget: auto-tag the entry in the background
-        tagEntry({ id: entry.id, body, created: entry.created, isDraft: false, wordCount: entry.wordCount });
+        const entryForTagging = { id: entry.id, body, created: entry.created, isDraft: false, wordCount: entry.wordCount };
+        tagEntry(entryForTagging).then(async () => {
+          // After tagging completes, extract tasks from the tags
+          await extractTasksFromTags(entryForTagging as JournalEntry);
+          await loadTasks();
+        });
+
+        // Fire-and-forget: refresh context memory if needed
+        shouldRefreshContext().then(shouldRefresh => {
+          if (shouldRefresh) refreshContextMemory();
+        });
 
         // Award achievements (#12)
         const totalEntries = (await db.entries.toArray()).filter(e => !e.isDraft).length;
@@ -253,8 +276,12 @@ export default function JournalPage() {
       reflectAbortRef.current?.abort();
       reflectAbortRef.current = new AbortController();
 
-      const tasksSummary = await getTodayTasksSummary();
-      const messages = getReflectionPrompt(body, tasksSummary || undefined);
+      const [tasksSummary, contextMemory, recentSummaries] = await Promise.all([
+        getTodayTasksSummary(),
+        getContextMemoryPrompt(),
+        getEntrySummaries(3).then(s => s.length > 0 ? s.join('\n') : undefined),
+      ]);
+      const messages = getReflectionPrompt(body, tasksSummary || undefined, contextMemory || undefined, recentSummaries);
       let result = '';
       for await (const chunk of streamChat(messages, { apiKey, model }, reflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
@@ -298,8 +325,12 @@ export default function JournalPage() {
       savedReflectAbortRef.current?.abort();
       savedReflectAbortRef.current = new AbortController();
 
-      const tasksSummary = await getTodayTasksSummary();
-      const messages = getReflectionPrompt(entry.body, tasksSummary || undefined);
+      const [tasksSummary, contextMemory, recentSummaries] = await Promise.all([
+        getTodayTasksSummary(),
+        getContextMemoryPrompt(),
+        getEntrySummaries(3).then(s => s.length > 0 ? s.join('\n') : undefined),
+      ]);
+      const messages = getReflectionPrompt(entry.body, tasksSummary || undefined, contextMemory || undefined, recentSummaries);
       let result = '';
       for await (const chunk of streamChat(messages, { apiKey, model }, savedReflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;

@@ -69,6 +69,21 @@ export interface Task {
   done: boolean;
   createdAt: string;
   doneAt?: string;
+  /** Where the task came from: 'manual' | 'extracted' (from journal tagging) */
+  source?: 'manual' | 'extracted';
+  /** Entry ID if extracted from a journal entry */
+  entryId?: string;
+}
+
+export interface ContextMemory {
+  id: string; // always 'primary' — single rolling profile
+  patterns: string[];      // recurring themes
+  keyFacts: string[];      // stable things mentioned (work, people, hobbies)
+  openLoops: string[];     // unfinished threads
+  recentWins: string[];    // things that went well recently
+  moodTrend: string;       // brief trajectory
+  lastUpdated: string;     // ISO timestamp
+  entryCount: number;      // how many entries have been analyzed
 }
 
 // ─── Database ────────────────────────────────────────
@@ -80,6 +95,7 @@ class DriftDB extends Dexie {
   rewards!: Table<Reward>;
   moods!: Table<MoodEntry>;
   tasks!: Table<Task>;
+  contextMemory!: Table<ContextMemory>;
   settings!: Table<AppSettings>;
 
   constructor() {
@@ -101,6 +117,10 @@ class DriftDB extends Dexie {
     // v4: add tasks table for daily task tracking
     this.version(4).stores({
       tasks: 'id, date, done',
+    });
+    // v5: add context memory for rolling user profile
+    this.version(5).stores({
+      contextMemory: 'id',
     });
   }
 }
@@ -555,4 +575,85 @@ export async function getTodayTasksSummary(): Promise<string> {
   const done = tasks.filter(t => t.done).map(t => `✓ ${t.text}`);
   const open = tasks.filter(t => !t.done).map(t => `○ ${t.text}`);
   return [...open, ...done].join('\n');
+}
+
+// ─── Context Memory helpers ──────────────────────────
+
+/** Get the rolling context memory profile (singleton). */
+export async function getContextMemory(): Promise<ContextMemory | null> {
+  return (await db.contextMemory.get('primary')) ?? null;
+}
+
+/** Save/update the context memory profile. */
+export async function saveContextMemory(memory: Omit<ContextMemory, 'id'>): Promise<void> {
+  await db.contextMemory.put({ ...memory, id: 'primary' });
+}
+
+/** Get the last N non-draft entries for context building. */
+export async function getLastEntriesForContext(count: number = 10): Promise<JournalEntry[]> {
+  return db.entries
+    .orderBy('created')
+    .reverse()
+    .filter(e => !e.isDraft)
+    .limit(count)
+    .toArray();
+}
+
+// ─── Task extraction from tagging ────────────────────
+
+/**
+ * Promote tasks extracted by auto-tagging into the Tasks table.
+ * Called after tagEntry() completes — looks at tasks_open and tasks_done.
+ */
+export async function extractTasksFromTags(entry: JournalEntry): Promise<void> {
+  const tags = await getTagsForEntry(entry.id);
+  if (!tags) return;
+
+  const entryDate = localDateKey(new Date(entry.created));
+
+  // Add open tasks
+  for (const taskText of (tags.mentions?.tasks_open ?? [])) {
+    if (!taskText.trim()) continue;
+    // Skip if a task with the same text already exists for this entry
+    const existing = await db.tasks
+      .where('entryId')
+      .equals(entry.id)
+      .filter(t => t.text === taskText)
+      .first();
+    if (existing) continue;
+
+    await db.tasks.add({
+      id: uuid(),
+      text: taskText,
+      date: entryDate,
+      done: false,
+      createdAt: entry.created,
+      source: 'extracted',
+      entryId: entry.id,
+    });
+  }
+
+  // Mark done tasks as completed
+  for (const taskText of (tags.mentions?.tasks_done ?? [])) {
+    if (!taskText.trim()) continue;
+    const existing = await db.tasks
+      .where('entryId')
+      .equals(entry.id)
+      .filter(t => t.text === taskText)
+      .first();
+    if (existing) {
+      await db.tasks.update(existing.id, { done: true, doneAt: entry.created });
+    } else {
+      await db.tasks.add({
+        id: uuid(),
+        text: taskText,
+        date: entryDate,
+        done: true,
+        createdAt: entry.created,
+        doneAt: entry.created,
+        source: 'extracted',
+        entryId: entry.id,
+      });
+    }
+  }
 }
