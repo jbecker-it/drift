@@ -110,11 +110,11 @@ export async function refreshContextMemory(): Promise<void> {
 
     // Validate output — ensure arrays are arrays of strings
     const validated = {
-      patterns: Array.isArray(parsed.patterns) ? parsed.patterns.filter((x: any) => typeof x === 'string').slice(0, 10) : [],
-      keyFacts: Array.isArray(parsed.keyFacts) ? parsed.keyFacts.filter((x: any) => typeof x === 'string').slice(0, 10) : [],
-      openLoops: Array.isArray(parsed.openLoops) ? parsed.openLoops.filter((x: any) => typeof x === 'string').slice(0, 10) : [],
-      recentWins: Array.isArray(parsed.recentWins) ? parsed.recentWins.filter((x: any) => typeof x === 'string').slice(0, 10) : [],
-      moodTrend: typeof parsed.moodTrend === 'string' ? parsed.moodTrend : '',
+      patterns: Array.isArray(parsed.patterns) ? parsed.patterns.filter((x: any) => typeof x === 'string').slice(0, 5) : [],
+      keyFacts: Array.isArray(parsed.keyFacts) ? parsed.keyFacts.filter((x: any) => typeof x === 'string').slice(0, 8) : [],
+      openLoops: Array.isArray(parsed.openLoops) ? parsed.openLoops.filter((x: any) => typeof x === 'string').slice(0, 5) : [],
+      recentWins: Array.isArray(parsed.recentWins) ? parsed.recentWins.filter((x: any) => typeof x === 'string').slice(0, 5) : [],
+      moodTrend: typeof parsed.moodTrend === 'string' ? parsed.moodTrend.substring(0, 200) : '',
     };
 
     // Save updated memory

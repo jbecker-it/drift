@@ -148,8 +148,8 @@ export default function JournalPage() {
         getTodayTasksSummary(),
         getContextMemoryPrompt(),
         getEntrySummaries(5).then(summaries => {
-          // Exclude entries that match this entry's first 50 chars to avoid duplication
-          const filtered = summaries.filter(s => !s.includes(entryBody.substring(0, 50)));
+          const bodyPrefix = entryBody.substring(0, 80).toLowerCase();
+          const filtered = summaries.filter(s => !s.toLowerCase().includes(bodyPrefix));
           return filtered.length > 0 ? filtered.slice(0, 3).join('\n') : undefined;
         }),
       ]);
@@ -195,8 +195,11 @@ export default function JournalPage() {
           mood,
           wordCount: body.split(/\s+/).filter(Boolean).length,
         });
-        // Re-tag the entry with updated content
-        const editEntry = { id: entryId, body, created: new Date().toISOString(), isDraft: false, wordCount: body.split(/\s+/).filter(Boolean).length };
+        // Re-tag with updated content — use original entry's created date
+        const existingEntry = await db.entries.get(entryId);
+        const editEntry = { id: entryId, body, created: existingEntry?.created || new Date().toISOString(), isDraft: false, wordCount: body.split(/\s+/).filter(Boolean).length };
+        // Remove old extracted tasks for this entry before re-extracting
+        await db.tasks.where('entryId').equals(entryId).filter(t => t.source === 'extracted').delete();
         tagEntry(editEntry).then(async () => {
           await extractTasksFromTags(editEntry as JournalEntry);
           await loadTasks();
@@ -217,16 +220,11 @@ export default function JournalPage() {
         if (mood) await logMood(mood, entry.id);
         setActiveEntryId(entryId);
 
-        // Fire-and-forget: auto-tag the entry in the background
+        // Fire-and-forget: auto-tag, extract tasks, then refresh context
         const entryForTagging = { id: entry.id, body, created: entry.created, isDraft: false, wordCount: entry.wordCount };
         tagEntry(entryForTagging).then(async () => {
-          // After tagging completes, extract tasks from the tags
           await extractTasksFromTags(entryForTagging as JournalEntry);
           await loadTasks();
-        }).catch(() => {}); // Background job — fail silently
-
-        // Context refresh: run after tagging completes to include this entry
-        tagEntry(entryForTagging).then(async () => {
           const shouldRefresh = await shouldRefreshContext();
           if (shouldRefresh) await refreshContextMemory();
         }).catch(() => {});
@@ -234,7 +232,7 @@ export default function JournalPage() {
         // Award achievements (#12)
         const totalEntries = (await db.entries.toArray()).filter(e => !e.isDraft).length;
         const totalWords = (await db.entries.toArray()).filter(e => !e.isDraft).reduce((s, e) => s + e.wordCount, 0);
-        checkAndAwardAchievements(totalEntries, totalWords);
+        checkAndAwardAchievements(totalEntries, totalWords).catch(() => {});
       }
 
       await loadEntries();
@@ -452,7 +450,7 @@ export default function JournalPage() {
         {tasks.length > 0 && (
           <div className="space-y-1.5 mb-3">
             {tasks.map(task => (
-              <label
+              <div
                 key={task.id}
                 className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
                   task.done ? 'opacity-50' : 'hover:bg-bg-hover'
@@ -474,7 +472,7 @@ export default function JournalPage() {
                 >
                   ✕
                 </button>
-              </label>
+              </div>
             ))}
           </div>
         )}

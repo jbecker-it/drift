@@ -116,12 +116,17 @@ class DriftDB extends Dexie {
     });
     // v4: add tasks table for daily task tracking
     this.version(4).stores({
-      tasks: 'id, date, done, entryId',
+      tasks: 'id, date, done',
     });
-    // v5: add context memory for rolling user profile
+    // v5: add context memory
     this.version(5).stores({
       contextMemory: 'id',
     });
+    // v6: add entryId index to tasks (was missing in v4)
+    this.version(6).stores({
+      tasks: 'id, date, done, entryId',
+    });
+
   }
 }
 
