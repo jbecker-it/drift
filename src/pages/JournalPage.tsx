@@ -288,7 +288,11 @@ export default function JournalPage() {
       const [tasksSummary, contextMemory, recentSummaries] = await Promise.all([
         getTodayTasksSummary(),
         getContextMemoryPrompt(),
-        getEntrySummaries(3).then(s => s.length > 0 ? s.join('\n') : undefined),
+        getEntrySummaries(5).then(summaries => {
+          const bodyPrefix = body.substring(0, 80).toLowerCase();
+          const filtered = summaries.filter(s => !s.toLowerCase().includes(bodyPrefix));
+          return filtered.length > 0 ? filtered.slice(0, 3).join('\n') : undefined;
+        }),
       ]);
       const messages = getReflectionPrompt(body, tasksSummary || undefined, contextMemory || undefined, recentSummaries);
       let result = '';

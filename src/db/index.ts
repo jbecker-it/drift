@@ -503,7 +503,6 @@ export async function clearAllData(): Promise<void> {
   await db.moods.clear();
   await db.tasks.clear();
   await db.contextMemory.clear();
-  await db.tasks.clear();
   await db.settings.clear();
 }
 
