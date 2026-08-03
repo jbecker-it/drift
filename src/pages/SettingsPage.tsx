@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   getApiKey, getModel, getPersonality, setSetting,
   getBackgroundModel,
@@ -13,6 +13,11 @@ import {
   getNotificationSettings, saveNotificationSettings, scheduleNotifications,
   type NotificationSettings,
 } from '../notifications';
+import {
+  getSyncConfig, saveSyncConfig, testConnection, performSync,
+  getLastSyncTime,
+  type SyncConfig,
+} from '../sync/webdavSync';
 
 const PERSONALITIES = [
   { id: 'coach', label: 'Coach', icon: '🏆' },
@@ -39,16 +44,45 @@ export default function SettingsPage() {
     morningTime: '08:00',
     eveningTime: '20:00',
     taskReminderTime: '18:00',
+    perSlotTasks: true,
+    morningSlotEnd: '12:00',
+    middaySlotEnd: '14:00',
+    afternoonSlotEnd: '18:00',
+    nightSlotEnd: '22:00',
   });
   const [notifPermission, setNotifPermission] = useState<NotificationPermission>('default');
+  // #34: notificationsSupported() is safe here — this is a client-only PWA with no SSR/SSG.
   const notifSupported = notificationsSupported();
+  // #28: Sequence number + promise chain to serialize notification saves.
+  const notifSeqRef = useRef(0);
+  const notifSaveChain = useRef(Promise.resolve());
+
+  // WebDAV sync state
+  const [syncConfig, setSyncConfig] = useState<SyncConfig>({ enabled: false, serverUrl: '' });
+  const [syncTesting, setSyncTesting] = useState(false);
+  const [syncNow, setSyncNow] = useState(false);
+  const [syncResult, setSyncResult] = useState<{ ok: boolean; error?: string } | null>(null);
+  const [lastSync, setLastSync] = useState<string | null>(null);
+  // #32: Track whether the endpoint has been verified via testConnection.
+  const [syncVerified, setSyncVerified] = useState(false);
+  // #30: Debounce ref for sync config saves to prevent race overwrites.
+  const syncSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [allModels, setAllModels] = useState<OpenRouterModel[]>([]);
   const [loadingModels, setLoadingModels] = useState(true);
   const [modelError, setModelError] = useState('');
   const [modelSearch, setModelSearch] = useState('');
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => {
+    // #27: Handle loading errors so the page doesn't stay in an incomplete state.
+    void loadData().catch(err => {
+      setSaveError(err.message || 'Failed to load settings');
+    });
+    return () => {
+      // Cleanup debounce timer on unmount.
+      if (syncSaveTimerRef.current) clearTimeout(syncSaveTimerRef.current);
+    };
+  }, []);
 
   // Re-check notification permission when page regains focus
   useEffect(() => {
@@ -62,9 +96,11 @@ export default function SettingsPage() {
   }, []);
 
   async function loadData() {
-    const [key, mod, pers, free, bgMod, notifSettings] = await Promise.all([
+    const [key, mod, pers, free, bgMod, notifSettings, syncConf, lastSyncTime] = await Promise.all([
       getApiKey(), getModel(), getPersonality(), getFreeOnlySetting(), getBackgroundModel(),
       getNotificationSettings(),
+      getSyncConfig(),
+      getLastSyncTime(),
     ]);
     if (key) setApiKey(key);
     setModel(mod);
@@ -72,6 +108,8 @@ export default function SettingsPage() {
     setFreeOnly(free);
     setNotifSettings(notifSettings);
     setNotifPermission(getPermission());
+    setSyncConfig(syncConf);
+    setLastSync(lastSyncTime);
     // Background model
     const primaryModel = mod;
     if (bgMod === primaryModel || bgMod === 'same') {
@@ -133,9 +171,10 @@ export default function SettingsPage() {
         setSetting('openrouter_model', model),
         setSetting('openrouter_background_model', bgModelSame ? 'same' : bgModel),
         setSetting('personality', personality),
-        saveNotificationSettings(notifSettings),
       ]);
-      // Reschedule notifications with new settings
+      // Route notification save through the serialized chain
+      notifSaveChain.current = notifSaveChain.current.then(() => saveNotificationSettings(notifSettings));
+      await notifSaveChain.current;
       await scheduleNotifications();
       setSaved(true);
       setSaveError(null);
@@ -159,15 +198,44 @@ export default function SettingsPage() {
     }
     const updated = { ...notifSettings, enabled: nextEnabled };
     setNotifSettings(updated);
-    await saveNotificationSettings(updated);
-    await scheduleNotifications();
+    // #6/#28: Serialize saves via promise chain — only the latest write schedules notifications.
+    const seq = ++notifSeqRef.current;
+    notifSaveChain.current = notifSaveChain.current.then(async () => {
+      try {
+        await saveNotificationSettings(updated);
+        if (seq === notifSeqRef.current) {
+          await scheduleNotifications();
+        }
+      } catch (err) {
+        if (seq === notifSeqRef.current) {
+          setNotifSettings(prev => ({ ...prev, enabled: !nextEnabled }));
+          setSaveError(err instanceof Error ? err.message : 'Failed to save notification settings');
+        }
+      }
+    });
   };
 
-  const handleNotifTimeChange = async (field: 'morningTime' | 'eveningTime' | 'taskReminderTime', value: string) => {
+  const handleNotifTimeChange = async (
+    field: 'morningTime' | 'eveningTime' | 'taskReminderTime',
+    value: string,
+  ) => {
     const updated = { ...notifSettings, [field]: value };
     setNotifSettings(updated);
-    await saveNotificationSettings(updated);
-    await scheduleNotifications();
+    const seq = ++notifSeqRef.current;
+    const prevValue = notifSettings[field]; // Capture for rollback
+    notifSaveChain.current = notifSaveChain.current.then(async () => {
+      try {
+        await saveNotificationSettings(updated);
+        if (seq === notifSeqRef.current) {
+          await scheduleNotifications();
+        }
+      } catch (err) {
+        if (seq === notifSeqRef.current) {
+          setNotifSettings(prev => ({ ...prev, [field]: prevValue }));
+          setSaveError(err instanceof Error ? err.message : 'Failed to save notification settings');
+        }
+      }
+    });
   };
 
   const handleExport = async () => {
@@ -186,6 +254,53 @@ export default function SettingsPage() {
     await clearAllData();
     setConfirmClear(false);
     window.location.reload();
+  };
+
+  // #31: Validate URL before testing connection.
+  const handleTestConnection = async () => {
+    if (!syncConfig.serverUrl || !syncConfig.serverUrl.trim()) {
+      setSyncResult({ ok: false, error: 'Please enter a server URL first.' });
+      return;
+    }
+    try {
+      setSyncTesting(true);
+      setSyncResult(null);
+      const result = await testConnection(syncConfig);
+      setSyncResult(result);
+      // #32: Mark as verified only if the test succeeds.
+      if (result.ok) setSyncVerified(true);
+    } catch (err) {
+      setSyncResult({ ok: false, error: err instanceof Error ? err.message : 'Connection test failed' });
+    } finally {
+      setSyncTesting(false);
+    }
+  };
+
+  const handleSyncNow = async () => {
+    setSyncNow(true);
+    setSyncResult(null);
+    try {
+      const result = await performSync();
+      setSyncResult(result.error ? { ok: false, error: result.error } : { ok: true });
+      if (result.lastSync) setLastSync(result.lastSync);
+    } catch (err) {
+      setSyncResult({ ok: false, error: err instanceof Error ? err.message : 'Sync failed' });
+    } finally {
+      setSyncNow(false);
+    }
+  };
+
+  // #30: Debounce sync config saves to prevent race overwrites from rapid field edits.
+  const handleSyncConfigChange = (updates: Partial<SyncConfig>) => {
+    const newConfig = { ...syncConfig, ...updates };
+    setSyncConfig(newConfig);
+    setSyncVerified(false);
+    if (syncSaveTimerRef.current) clearTimeout(syncSaveTimerRef.current);
+    syncSaveTimerRef.current = setTimeout(() => {
+      saveSyncConfig(newConfig).catch(err => {
+        setSaveError(err instanceof Error ? err.message : 'Failed to save sync config');
+      });
+    }, 500);
   };
 
   return (
@@ -477,6 +592,117 @@ export default function SettingsPage() {
                 className="flex-1 px-3 py-1.5 bg-bg-input border border-border rounded-lg text-sm text-text-secondary focus:border-accent-green focus:ring-1 focus:ring-accent-green transition-colors"
               />
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* Cross-Platform Sync */}
+      <div className="bg-bg-card border border-border rounded-xl p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium text-text-secondary">Cross-Platform Sync</h3>
+            <p className="text-xs text-text-dim mt-0.5">
+              Sync journal data via WebDAV (optional)
+            </p>
+          </div>
+          <button
+            onClick={() => handleSyncConfigChange({ enabled: !syncConfig.enabled })}
+            aria-label="Toggle sync"
+            aria-pressed={syncConfig.enabled}
+            className={`relative w-12 h-6 rounded-full transition-colors flex-shrink-0 ${
+              syncConfig.enabled ? 'bg-accent-green' : 'bg-bg-hover'
+            }`}
+          >
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200 ${
+              syncConfig.enabled ? 'translate-x-6' : 'translate-x-0'
+            }`} />
+          </button>
+        </div>
+        <p className="text-xs text-text-dim">
+          Works with Nextcloud, Synology, ownCloud, or any WebDAV server.
+          Data is always stored locally first — sync is optional.
+        </p>
+
+        {syncConfig.enabled && (
+          <div className="space-y-3 pt-2 border-t border-border">
+            {/* #32: Show unverified status when sync is configured but not yet tested. */}
+            {syncConfig.enabled && !syncVerified && syncResult?.ok !== true && (
+              <p className="text-xs text-yellow-400">
+                ⚠️ Sync is configured but unverified — test the connection before syncing.
+              </p>
+            )}
+            <div>
+              <label className="text-sm text-text-secondary">Server URL</label>
+              <input
+                type="url"
+                value={syncConfig.serverUrl}
+                onChange={e => handleSyncConfigChange({ serverUrl: e.target.value })}
+                placeholder="https://nas.example.com/drift-sync/"
+                className="w-full px-4 py-2.5 mt-1 bg-bg-input border border-border rounded-xl
+                           text-text-primary text-sm placeholder:text-text-dim
+                           focus:border-accent-green focus:ring-1 focus:ring-accent-green
+                           transition-colors"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-sm text-text-secondary">Username</label>
+                <input
+                  type="text"
+                  value={syncConfig.username || ''}
+                  onChange={e => handleSyncConfigChange({ username: e.target.value })}
+                  placeholder="Optional"
+                  className="w-full px-4 py-2.5 mt-1 bg-bg-input border border-border rounded-xl
+                             text-text-primary text-sm placeholder:text-text-dim
+                             focus:border-accent-green focus:ring-1 focus:ring-accent-green
+                             transition-colors"
+                />
+              </div>
+              <div>
+                <label className="text-sm text-text-secondary">Password</label>
+                <input
+                  type="password"
+                  value={syncConfig.password || ''}
+                  onChange={e => handleSyncConfigChange({ password: e.target.value })}
+                  placeholder="Optional"
+                  className="w-full px-4 py-2.5 mt-1 bg-bg-input border border-border rounded-xl
+                             text-text-primary text-sm placeholder:text-text-dim
+                             focus:border-accent-green focus:ring-1 focus:ring-accent-green
+                             transition-colors"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={handleTestConnection}
+                disabled={syncTesting || !syncConfig.serverUrl}
+                className="px-4 py-2 border border-border rounded-xl text-sm text-text-secondary
+                           hover:bg-bg-hover transition-colors disabled:opacity-40"
+              >
+                {syncTesting ? '⏳ Testing...' : '🔌 Test connection'}
+              </button>
+              <button
+                onClick={handleSyncNow}
+                disabled={syncNow || !syncConfig.serverUrl}
+                className="px-4 py-2 bg-accent-green text-bg-primary rounded-xl text-sm font-medium
+                           hover:bg-accent-green/90 transition-colors disabled:opacity-40"
+              >
+                {syncNow ? '⏳ Syncing...' : '🔄 Sync now'}
+              </button>
+            </div>
+
+            {syncResult && (
+              <p className={`text-xs ${syncResult.ok ? 'text-accent-green' : 'text-red-400'}`}>
+                {syncResult.ok ? '✓ Connection successful' : `✗ ${syncResult.error}`}
+              </p>
+            )}
+
+            {lastSync && (
+              <p className="text-xs text-text-dim">
+                Last sync: {new Date(lastSync).toLocaleString()}
+              </p>
+            )}
           </div>
         )}
       </div>

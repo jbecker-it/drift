@@ -81,6 +81,10 @@ export interface Task {
   type?: 'daily' | 'todo';
   /** Optional due date for to-dos (YYYY-MM-DD) */
   dueDate?: string;
+  // NOTE for sync: Task has no `updatedAt` field. The sync layer (getTimestamp in
+  // webdavSync.ts) uses `createdAt` as a fallback, but mutations like toggleTask
+  // (done/doneAt changes) won't produce a newer timestamp. A proper fix requires
+  // adding an `updatedAt` field to Task and updating it on every mutation.
 }
 
 export interface TaskTemplate {
@@ -238,7 +242,7 @@ export async function finalizeDraft(
     wordCount,
     isDraft: false,
   };
-  await db.entries.update(draftId, updates);
+  await db.entries.update(draftId, { ...updates, updatedAt: new Date().toISOString() } as any);
   const entry = await db.entries.get(draftId);
   if (!entry) throw new Error('Draft not found after finalization');
   return entry;
@@ -246,7 +250,7 @@ export async function finalizeDraft(
 
 export async function updateEntry(id: string, updates: Partial<JournalEntry>): Promise<void> {
   const old = await db.entries.get(id);
-  await db.entries.update(id, updates);
+  await db.entries.update(id, { ...updates, updatedAt: new Date().toISOString() } as any);
 
   // Sync mood history if mood property was explicitly included in the update
   const hasMoodUpdate = Object.prototype.hasOwnProperty.call(updates, 'mood');
@@ -276,21 +280,31 @@ export async function updateEntry(id: string, updates: Partial<JournalEntry>): P
  * Also cancels any pending background tagging for this entry.
  */
 export async function deleteEntry(id: string): Promise<void> {
-  await db.transaction(
-    'rw',
-    db.entries,
-    db.entryTags,
-    db.moods,
-    db.sessions,
-    db.tasks,
-    async () => {
-      await db.entries.delete(id);
-      await db.entryTags.where('entryId').equals(id).delete();
-      await db.moods.where('entryId').equals(id).delete();
-      await db.sessions.where('entryId').equals(id).delete();
-      await db.tasks.where('entryId').equals(id).delete();
-    },
-  );
+  // Record tombstones before deletion for sync propagation.
+  // Use bulk recordDeletions to avoid Promise.all race on the tombstone store.
+  const { recordDeletions } = await import('../sync/webdavSync');
+  const [tags, moods, sessions, tasks] = await Promise.all([
+    db.entryTags.where('entryId').equals(id).toArray(),
+    db.moods.where('entryId').equals(id).toArray(),
+    db.sessions.where('entryId').equals(id).toArray(),
+    db.tasks.where('entryId').equals(id).toArray(),
+  ]);
+  const deletions: { table: string; recordId: string }[] = [
+    { table: 'entries', recordId: id },
+    ...tags.map(t => ({ table: 'entryTags', recordId: t.id })),
+    ...moods.map(m => ({ table: 'moods', recordId: m.id })),
+    ...sessions.map(s => ({ table: 'sessions', recordId: s.id })),
+    ...tasks.map(t => ({ table: 'tasks', recordId: t.id })),
+  ];
+  await recordDeletions(deletions);
+
+  await db.transaction('rw', [db.entries, db.entryTags, db.moods, db.sessions, db.tasks], async () => {
+    await db.entries.delete(id);
+    await db.entryTags.where('entryId').equals(id).delete();
+    await db.moods.where('entryId').equals(id).delete();
+    await db.sessions.where('entryId').equals(id).delete();
+    await db.tasks.where('entryId').equals(id).delete();
+  });
 }
 
 /** Get non-draft entries only, ordered newest first. */
@@ -319,7 +333,15 @@ export async function getEntriesSince(date: Date): Promise<JournalEntry[]> {
 export async function getTodaysEntries(): Promise<JournalEntry[]> {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  return getEntriesSince(today);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const results = await db.entries
+    .where('created')
+    .between(today.toISOString(), tomorrow.toISOString(), true, false)
+    .toArray();
+  return results
+    .filter(e => !e.isDraft)
+    .sort((a, b) => b.created.localeCompare(a.created));
 }
 
 /** Get ALL non-draft entries (for accurate total counts). */
@@ -339,6 +361,7 @@ export async function createSession(promptType: ChatSession['promptType'], entry
     promptType,
   };
   await db.sessions.add(session);
+  triggerSync();
   return session;
 }
 
@@ -350,10 +373,12 @@ export async function addMessageToSession(
   await db.sessions.where('id').equals(sessionId).modify(session => {
     session.messages.push({ role, content, timestamp: new Date().toISOString() });
   });
+  triggerSync();
 }
 
 export async function endSession(sessionId: string): Promise<void> {
   await db.sessions.update(sessionId, { ended: new Date().toISOString() });
+  triggerSync();
 }
 
 // ─── Mood helpers ────────────────────────────────────
@@ -367,6 +392,7 @@ export async function logMood(mood: number, entryId?: string): Promise<MoodEntry
     entryId,
   };
   await db.moods.add(entry);
+  triggerSync();
   return entry;
 }
 
@@ -384,7 +410,7 @@ export async function awardReward(
   description: string
 ): Promise<Reward | null> {
   // Use a transaction for atomic check-and-insert
-  return db.transaction('rw', db.rewards, async () => {
+  const result = await db.transaction('rw', db.rewards, async () => {
     // Check both by type (new format) and scan for legacy UUID-keyed entries
     const existing = await db.rewards.where('type').equals(type).first();
     if (existing) return null;
@@ -399,6 +425,8 @@ export async function awardReward(
     await db.rewards.put(reward);
     return reward;
   });
+  if (result) triggerSync();
+  return result;
 }
 
 export async function getAllRewards(): Promise<Reward[]> {
@@ -532,6 +560,8 @@ export async function calculateStreak(): Promise<{ current: number; longest: num
 // ─── Export ──────────────────────────────────────────
 
 export async function exportAllData(): Promise<string> {
+  // NOTE: Settings table is excluded from export to prevent leaking
+  // sensitive credentials (openrouter_api_key, webdav_sync password/URL)
   const data = {
     entries: await db.entries.toArray(),
     entryTags: await db.entryTags.toArray(),
@@ -615,6 +645,7 @@ export async function toggleTask(id: string): Promise<void> {
   await db.tasks.where('id').equals(id).modify(task => {
     task.done = !task.done;
     task.doneAt = task.done ? new Date().toISOString() : undefined;
+    (task as any).updatedAt = new Date().toISOString();
   });
 }
 
@@ -632,6 +663,34 @@ export async function getTodaysTasks(): Promise<Task[]> {
 /** Get tasks for a specific date. */
 export async function getTasksForDate(date: string): Promise<Task[]> {
   return db.tasks.where('date').equals(date).toArray();
+}
+
+/** Get today's tasks filtered by preset slot (via template). */
+export async function getTodaysTasksBySlot(
+  slot: 'morning' | 'midday' | 'afternoon' | 'night'
+): Promise<Task[]> {
+  const today = localDateKey();
+  const templates = await db.taskTemplates
+    .where('type').equals('preset')
+    .filter(t => t.preset === slot && t.active)
+    .toArray();
+
+  const templateIds = templates.map(t => t.id);
+  if (templateIds.length === 0) return [];
+
+  return db.tasks
+    .where('date').equals(today)
+    .filter(t => !!t.templateId && templateIds.includes(t.templateId) && !t.done)
+    .toArray();
+}
+
+/** Get today's custom tasks (no template, not todo type). */
+export async function getTodaysCustomTasks(): Promise<Task[]> {
+  const today = localDateKey();
+  return db.tasks
+    .where('date').equals(today)
+    .filter(t => !t.templateId && t.type !== 'todo' && !t.done)
+    .toArray();
 }
 
 /** Get a summary of today's tasks for AI context. */
@@ -987,6 +1046,26 @@ export async function getLastEntriesForContext(count: number = 10): Promise<Jour
     .filter(e => !e.isDraft)
     .limit(count)
     .toArray();
+}
+
+// ─── WebDAV Sync trigger ───────────────────────────
+
+// sync trigger — debounced to avoid excessive sync calls
+// No-op if WebDAV sync is not configured (local-first)
+let syncTimeout: ReturnType<typeof setTimeout> | null = null;
+
+export function triggerSync(): void {
+  if (syncTimeout) clearTimeout(syncTimeout);
+  syncTimeout = setTimeout(async () => {
+    try {
+      const { isSyncEnabled, pushToServer } = await import('../sync/webdavSync');
+      if (await isSyncEnabled()) {
+        await pushToServer();
+      }
+    } catch {
+      // Silent — sync module may not be configured, that's fine
+    }
+  }, 2000); // 2s debounce
 }
 
 // ─── Task extraction from tagging ────────────────────

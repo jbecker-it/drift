@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import JournalPage from './pages/JournalPage';
 import EntriesPage from './pages/EntriesPage';
 import TasksPage from './pages/TasksPage';
@@ -9,6 +9,7 @@ import SettingsPage from './pages/SettingsPage';
 import Onboarding from './components/Onboarding';
 import { getApiKey } from './db';
 import { initNotifications } from './notifications';
+import { isSyncEnabled, pullFromServerSafe } from './sync/webdavSync';
 
 function Sidebar() {
   const [isOpen, setIsOpen] = useState(false);
@@ -85,7 +86,7 @@ function Sidebar() {
         </nav>
 
         <div className="px-4 mt-auto">
-          <p className="text-xs text-text-dim text-center">v0.4.1</p>
+          <p className="text-xs text-text-dim text-center">v0.5.0</p>
         </div>
       </aside>
     </>
@@ -118,11 +119,34 @@ export default function App() {
         setInitError(true);
         setReady(true);
       }
-    }, 8000);
+    }, 15000); // 15s — longer than the 10s sync timeout
 
-    getApiKey().then(key => {
-      clearTimeout(timeout);
+    getApiKey().then(async key => {
       if (cancelled) return;
+      setInitError(false); // Clear any prior timeout error
+
+      // #36: Use pullFromServerSafe directly to capture conflict info.
+      // #35: Complete the initial sync pull before marking ready, with a timeout.
+      try {
+        if (await isSyncEnabled()) {
+          const syncTimeout = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Sync pull timed out')), 10000)
+          );
+          const syncResult = await Promise.race([
+            pullFromServerSafe(),
+            syncTimeout,
+          ]);
+          // #36: Log any conflicts discovered during initial pull.
+          if (syncResult.conflicts.length > 0) {
+            console.warn('Drift: initial sync found conflicts', syncResult.conflicts);
+          }
+        }
+      } catch (err) {
+        console.warn('Drift: initial sync pull failed', err);
+      }
+
+      if (cancelled) return;
+      clearTimeout(timeout);
       setHasApiKey(!!key);
       setReady(true);
       // Initialize notifications after app is ready
@@ -136,6 +160,16 @@ export default function App() {
     });
 
     return () => { cancelled = true; clearTimeout(timeout); };
+  }, []);
+
+  // #37: Re-read the API key after onboarding completes to ensure consistency.
+  const handleOnboardingComplete = useCallback(async () => {
+    try {
+      const key = await getApiKey();
+      setHasApiKey(!!key);
+    } catch {
+      setHasApiKey(true);
+    }
   }, []);
 
   if (!ready) {
@@ -163,7 +197,7 @@ export default function App() {
   }
 
   if (!hasApiKey) {
-    return <Onboarding onComplete={() => setHasApiKey(true)} />;
+    return <Onboarding onComplete={handleOnboardingComplete} />;
   }
 
   return (
