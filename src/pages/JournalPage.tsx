@@ -84,7 +84,7 @@ export default function JournalPage() {
 
   const loadTasks = useCallback(async () => {
     const today = await getTodaysTasks();
-    setTasks(today.sort((a, b) => {
+    setTasks([...today].sort((a, b) => {
       if (a.done !== b.done) return a.done ? 1 : -1;
       return a.createdAt.localeCompare(b.createdAt);
     }));
