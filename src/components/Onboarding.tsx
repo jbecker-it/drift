@@ -15,13 +15,18 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
 
   const handleFinish = async () => {
     setSaving(true);
-    await Promise.all([
-      setSetting('openrouter_api_key', apiKey),
-      setSetting('openrouter_model', 'anthropic/claude-sonnet-5'),
-      setBackgroundModel('deepseek/deepseek-v4-flash'),
-      setSetting('personality', personality),
-    ]);
-    onComplete();
+    try {
+      await Promise.all([
+        setSetting('openrouter_api_key', apiKey),
+        setSetting('openrouter_model', 'anthropic/claude-sonnet-5'),
+        setBackgroundModel('deepseek/deepseek-v4-flash'),
+        setSetting('personality', personality),
+      ]);
+      onComplete();
+    } catch (err) {
+      console.error('Drift: failed to save onboarding settings', err);
+      setSaving(false);
+    }
   };
 
   return (
