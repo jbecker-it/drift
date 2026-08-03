@@ -12,6 +12,11 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 - 🧠 **Context Memory** — Drift builds a rolling profile of you (patterns, key facts, open loops, recent wins, mood trend) that makes AI reflections feel personal instead of generic. Refreshed every ~5 entries by the background model.
 - 🤖 **AI Reflections** — Get personalized reflections powered by your context memory, today's tasks, recent entry summaries, and current entry — all in one prompt.
 - ✅ **Daily Tasks** — Add tasks for today, tick them off while journaling. Tasks are also auto-extracted from your entries by the background model.
+- 📋 **Task Presets** — Create recurring daily tasks for morning, midday, afternoon, and night. Tasks auto-appear each day in their time slot. Move tasks between segments with one click.
+- 📆 **Weekly Tasks** — Set tasks that repeat weekly with configurable frequency (e.g., "exercise 3×/week"). Track completions across the running week with progress dots.
+- 📝 **To-Dos** — Persistent tasks that don't expire daily. Set optional due dates with overdue/today/this-week visual urgency cues.
+- 🔔 **Smart Notifications** — Configurable reminders to journal and check tasks. Evening reminders only fire if you haven't journaled. Task reminders check for undone tasks, overdue to-dos, and stalling weekly tasks.
+- 🧠 **AI Nudges** — Reflection and coach chat now include task context: undone daily tasks, overdue to-dos, and stalling weekly tasks get gentle, natural reminders woven into the AI response.
 - 🏷️ **Auto-Tagging** — Every entry is automatically tagged with topics, mood words, tasks, and people mentioned. Extracted tasks are promoted to your task list.
 - 😊 **Mood Tracking** — Log your mood alongside entries to visualize emotional patterns over time.
 - 🔥 **Streak System** — Build consistency with a streak tracker that forgives one missed day and preserves your longest streak even after a lapse.
@@ -169,6 +174,74 @@ This project is licensed under the **MIT License**.
 ---
 
 ## 📋 Recent Changes
+
+### v0.4.0 — Task System Overhaul + Notifications + AI Nudges
+
+Major feature release: frictionless daily and weekly task management with smart AI-powered nudges.
+
+**📋 Task Presets (Daily Segments)**
+- New preset system with 4 time-of-day slots: Morning 🌅, Midday ☀️, Afternoon 🌤️, Night 🌙
+- Create preset tasks that auto-appear every day in their assigned slot
+- Move tasks between segments via click-to-open dropdown menu
+- Each slot shows progress counter; tasks get ✓ when done
+- DB schema v7: new `taskTemplates` table for preset and weekly definitions
+
+**📆 Weekly Tasks**
+- Define tasks with configurable frequency (1–7× per week)
+- Each week gets individual checkbox buttons — tick them off throughout the week
+- Progress dots visualize completions vs. needed count
+- "Running week" = Monday to Sunday — resets automatically
+- Stalling detection: AI nudges when weekly tasks are behind schedule
+
+**📝 To-Dos (Persistent Tasks)**
+- Tasks that persist until done — not tied to any specific day
+- Optional due date with visual urgency cues:
+  - 🔴 Red border + "Overdue" badge when past due
+  - 🟡 Amber border + "Today" badge when due today
+  - 🔵 Blue border when due within 3 days
+- DB schema v8: `type` and `dueDate` fields on tasks
+
+**🔔 PWA Notifications**
+- 3 configurable notification types with custom times:
+  - 🌅 Morning: journal reminder
+  - 🌙 Evening: only fires if no journal entry today
+  - 📋 Tasks: only fires if there are undone tasks or overdue to-dos
+- Settings UI with toggle + time pickers
+- Best-effort while app is open; uses service worker `showNotification` when available
+- Permission re-check on browser tab focus change
+
+**🧠 AI Nudges**
+- New `getTaskNudgeSummary()` builds context for AI: undone daily tasks, overdue to-dos, stalling weekly tasks
+- Injected into reflection prompt via `<task_nudge>` tag
+- Injected into coach chat context as `[Task status]` section
+- Reflection weaves ONE gentle nudge naturally — most urgent item first
+- Coach gets full nudge context for relevant references
+
+**✅ Bug Fixes (22 issues across 3 GPT-5.6 Luna Pro review rounds)**
+- Dexie v3 migration: added dedup `upgrade()` callback for duplicate `entryId` records
+- `getTodaysTasks` now excludes to-dos (previously returned them as daily tasks)
+- Notification timers: idempotent init, generation-token concurrency safety, DST-safe midnight reschedule
+- Weekly checkboxes: now correctly call `toggleTask` (was non-functional before fix)
+- Auto-save/Done race: `draftSessionRef` token prevents orphan drafts after Done
+- handleDone/save race: save checks session token before applying post-save state
+- Draft recovery: fixed to restore newest draft (was restoring oldest)
+- Save error handling: try/catch/finally with visible error messages
+- DB init timeout: shows error state with Retry button instead of nuking caches
+- Settings save: proper error handling with loading state
+- Move menu: keyboard accessible (click toggle, outside-click close, aria attributes)
+- Tabs: ARIA roles (`tab`, `tabpanel`, `aria-selected`, `aria-controls`)
+- Sidebar: `aria-label="Primary navigation"`, emoji `aria-hidden`
+- 404 catch-all route added
+- Notification permission re-checked on `visibilitychange`
+
+**Upgrade Notes (v0.3.x → v0.4.0)**
+> ⚠️ **Database migration is automatic** — Dexie handles schema upgrades transparently.
+
+1. **DB schema v7** — New `taskTemplates` table + task indexes (`templateId`, `weekKey`)
+2. **DB schema v8** — Tasks gain `type` and `dueDate` fields
+3. **Task tab redesign** — Tasks page now has 4 tabs: Daily · Weekly · To-Dos · Custom
+4. **Notification settings** — New section in Settings (disabled by default)
+5. **AI reflections** — Now include task nudge context (one gentle reminder per reflection)
 
 ### v0.3.0 — Context Memory + Enhanced Reflection + Tasks
 

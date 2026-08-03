@@ -3,7 +3,7 @@ import {
   saveEntry, saveDraft, finalizeDraft, getRecentEntries, logMood, updateEntry, deleteEntry, db,
   awardReward,
   getTodaysTasks, addTask, toggleTask, deleteTask, getTodayTasksSummary,
-  getEntrySummaries, extractTasksFromTags, type Task,
+  getEntrySummaries, extractTasksFromTags, getTaskNudgeSummary, type Task,
   type JournalEntry,
 } from '../db';
 import { streamChat } from '../ai/openrouter';
@@ -65,6 +65,8 @@ export default function JournalPage() {
   // Auto-save serialization — prevents duplicate drafts from concurrent timers
   const autoSaveChain = useRef<Promise<void>>(Promise.resolve());
   const isSavingRef = useRef(false);
+  // Session token — incremented on Done/new entry to invalidate stale auto-save callbacks
+  const draftSessionRef = useRef(0);
 
   // Cleanup: abort all in-flight streams when component unmounts
   useEffect(() => {
@@ -94,9 +96,9 @@ export default function JournalPage() {
   useEffect(() => {
     if (activeEntryId) return; // Don't recover if already editing
     (async () => {
-      const drafts = await db.entries.filter(e => e.isDraft).reverse().sortBy('created');
+      const drafts = await db.entries.filter(e => e.isDraft).sortBy('created');
       if (drafts.length > 0) {
-        const draft = drafts[0]; // Most recent draft
+        const draft = drafts[drafts.length - 1]; // Most recent draft (sortBy is ascending)
         setBody(draft.body);
         setMood(draft.mood);
         draftIdRef.current = draft.id;
@@ -109,13 +111,21 @@ export default function JournalPage() {
   }, [body]);
 
   // Auto-save draft — serialized via promise chain to prevent duplicates
-  const autoSave = useCallback(async (text: string) => {
+  const autoSave = useCallback(async (text: string, session: number) => {
     if (text.trim().length < 10) return;
     if (isSavingRef.current) return;
+    // Skip if session has changed (user clicked Done or started new entry)
+    if (session !== draftSessionRef.current) return;
+
     if (draftIdRef.current) {
       await updateEntry(draftIdRef.current, { body: text, wordCount: text.split(/\s+/).filter(Boolean).length });
     } else {
       const draft = await saveDraft(text);
+      // Re-check session after async DB operation — clean up orphan if stale
+      if (session !== draftSessionRef.current) {
+        await deleteEntry(draft.id).catch(() => {});
+        return;
+      }
       draftIdRef.current = draft.id;
     }
   }, []);
@@ -123,9 +133,10 @@ export default function JournalPage() {
   useEffect(() => {
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     if (body.trim().length >= 10 && !activeEntryId) {
+      const session = draftSessionRef.current; // Capture current session
       autoSaveTimer.current = setTimeout(() => {
         // Chain onto previous auto-save to serialize them
-        autoSaveChain.current = autoSaveChain.current.then(() => autoSave(body)).catch(() => {});
+        autoSaveChain.current = autoSaveChain.current.then(() => autoSave(body, session)).catch(() => {});
       }, 5000);
     }
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
@@ -144,7 +155,7 @@ export default function JournalPage() {
       reflectAbortRef.current = new AbortController();
 
       // Build enhanced context for reflection
-      const [tasksSummary, contextMemory, recentSummaries] = await Promise.all([
+      const [tasksSummary, contextMemory, recentSummaries, taskNudge] = await Promise.all([
         getTodayTasksSummary(),
         getContextMemoryPrompt(),
         getEntrySummaries(5).then(summaries => {
@@ -152,6 +163,7 @@ export default function JournalPage() {
           const filtered = summaries.filter(s => !s.toLowerCase().includes(bodyPrefix));
           return filtered.length > 0 ? filtered.slice(0, 3).join('\n') : undefined;
         }),
+        getTaskNudgeSummary(),
       ]);
 
       const messages = getReflectionPrompt(
@@ -159,6 +171,7 @@ export default function JournalPage() {
         tasksSummary || undefined,
         contextMemory || undefined,
         recentSummaries,
+        taskNudge || undefined,
       );
       let result = '';
       for await (const chunk of streamChat(messages, { apiKey, model }, reflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
@@ -177,15 +190,19 @@ export default function JournalPage() {
   };
 
   // ─── Save (new entry or update existing) ───────────
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const handleSave = async () => {
     if (!body.trim() || isSavingRef.current) return;
+    const saveSession = draftSessionRef.current; // Capture session before async work
     isSavingRef.current = true;
     setSaving(true);
-
-    // Wait for any pending auto-save to complete first (serialized chain)
-    try { await autoSaveChain.current; } catch { /* auto-save failed, continue with manual save */ }
+    setSaveError(null);
 
     try {
+      // Wait for any pending auto-save to complete first (serialized chain)
+      try { await autoSaveChain.current; } catch { /* auto-save failed, continue with manual save */ }
+
       let entryId = activeEntryId;
 
       if (entryId) {
@@ -240,8 +257,12 @@ export default function JournalPage() {
       // Auto-reflect on save
       await runReflection(body, entryId!);
 
-      // Show continue option
-      setShowContinue(true);
+      // Only show continue if user hasn't clicked Done during save
+      if (saveSession === draftSessionRef.current) {
+        setShowContinue(true);
+      }
+    } catch (err: any) {
+      setSaveError(err.message || 'Failed to save entry');
     } finally {
       isSavingRef.current = false;
       setSaving(false);
@@ -264,6 +285,12 @@ export default function JournalPage() {
 
   // ─── Done (finish this entry) ──────────────────────
   const handleDone = () => {
+    // Abort any in-flight reflection or tagging
+    reflectAbortRef.current?.abort();
+    savedReflectAbortRef.current?.abort();
+    // Invalidate any pending auto-save callbacks
+    draftSessionRef.current++;
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     setBody('');
     setMood(undefined);
     setReflection('');
@@ -285,7 +312,7 @@ export default function JournalPage() {
       reflectAbortRef.current?.abort();
       reflectAbortRef.current = new AbortController();
 
-      const [tasksSummary, contextMemory, recentSummaries] = await Promise.all([
+      const [tasksSummary, contextMemory, recentSummaries, taskNudge] = await Promise.all([
         getTodayTasksSummary(),
         getContextMemoryPrompt(),
         getEntrySummaries(5).then(summaries => {
@@ -293,8 +320,9 @@ export default function JournalPage() {
           const filtered = summaries.filter(s => !s.toLowerCase().includes(bodyPrefix));
           return filtered.length > 0 ? filtered.slice(0, 3).join('\n') : undefined;
         }),
+        getTaskNudgeSummary(),
       ]);
-      const messages = getReflectionPrompt(body, tasksSummary || undefined, contextMemory || undefined, recentSummaries);
+      const messages = getReflectionPrompt(body, tasksSummary || undefined, contextMemory || undefined, recentSummaries, taskNudge || undefined);
       let result = '';
       for await (const chunk of streamChat(messages, { apiKey, model }, reflectAbortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
@@ -464,6 +492,7 @@ export default function JournalPage() {
                   type="checkbox"
                   checked={task.done}
                   onChange={async () => { await toggleTask(task.id); await loadTasks(); }}
+                  aria-label={`Mark "${task.text}" as ${task.done ? 'not done' : 'done'}`}
                   className="w-4 h-4 rounded border-border text-accent-green focus:ring-accent-green"
                 />
                 <span className={`flex-1 text-sm ${task.done ? 'text-text-dim line-through' : 'text-text-primary'}`}>
@@ -593,6 +622,9 @@ export default function JournalPage() {
                 {saving ? 'Saving...' : isEditing ? 'Update' : 'Save'}
               </button>
             </div>
+            {saveError && (
+              <p className="text-xs text-red-400 mt-1">{saveError}</p>
+            )}
           </div>
         </div>
       </div>

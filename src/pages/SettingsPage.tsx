@@ -8,6 +8,11 @@ import {
   fetchModels, filterModels, isFree, getFreeOnlySetting, setFreeOnlySetting,
   type OpenRouterModel,
 } from '../ai/models';
+import {
+  notificationsSupported, getPermission, requestPermission,
+  getNotificationSettings, saveNotificationSettings, scheduleNotifications,
+  type NotificationSettings,
+} from '../notifications';
 
 const PERSONALITIES = [
   { id: 'coach', label: 'Coach', icon: '🏆' },
@@ -23,8 +28,20 @@ export default function SettingsPage() {
   const [personality, setPersonality] = useState('coach');
   const [freeOnly, setFreeOnly] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [showKey, setShowKey] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+
+  // Notification settings
+  const [notifSettings, setNotifSettings] = useState<NotificationSettings>({
+    enabled: false,
+    morningTime: '08:00',
+    eveningTime: '20:00',
+    taskReminderTime: '18:00',
+  });
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission>('default');
+  const notifSupported = notificationsSupported();
 
   const [allModels, setAllModels] = useState<OpenRouterModel[]>([]);
   const [loadingModels, setLoadingModels] = useState(true);
@@ -33,14 +50,28 @@ export default function SettingsPage() {
 
   useEffect(() => { loadData(); }, []);
 
+  // Re-check notification permission when page regains focus
+  useEffect(() => {
+    const handler = () => {
+      if (document.visibilityState === 'visible') {
+        setNotifPermission(getPermission());
+      }
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
+  }, []);
+
   async function loadData() {
-    const [key, mod, pers, free, bgMod] = await Promise.all([
+    const [key, mod, pers, free, bgMod, notifSettings] = await Promise.all([
       getApiKey(), getModel(), getPersonality(), getFreeOnlySetting(), getBackgroundModel(),
+      getNotificationSettings(),
     ]);
     if (key) setApiKey(key);
     setModel(mod);
     setPersonality(pers);
     setFreeOnly(free);
+    setNotifSettings(notifSettings);
+    setNotifPermission(getPermission());
     // Background model
     const primaryModel = mod;
     if (bgMod === primaryModel || bgMod === 'same') {
@@ -94,14 +125,49 @@ export default function SettingsPage() {
   };
 
   const handleSave = async () => {
-    await Promise.all([
-      setSetting('openrouter_api_key', apiKey),
-      setSetting('openrouter_model', model),
-      setSetting('openrouter_background_model', bgModelSame ? 'same' : bgModel),
-      setSetting('personality', personality),
-    ]);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      await Promise.all([
+        setSetting('openrouter_api_key', apiKey),
+        setSetting('openrouter_model', model),
+        setSetting('openrouter_background_model', bgModelSame ? 'same' : bgModel),
+        setSetting('personality', personality),
+        saveNotificationSettings(notifSettings),
+      ]);
+      // Reschedule notifications with new settings
+      await scheduleNotifications();
+      setSaved(true);
+      setSaveError(null);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err: any) {
+      setSaveError(err.message || 'Failed to save settings');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleNotifToggle = async () => {
+    if (!notifSupported) return;
+    const nextEnabled = !notifSettings.enabled;
+    if (nextEnabled && notifPermission !== 'granted') {
+      try {
+        const granted = await requestPermission();
+        setNotifPermission(getPermission());
+        if (!granted) return;
+      } catch { return; }
+    }
+    const updated = { ...notifSettings, enabled: nextEnabled };
+    setNotifSettings(updated);
+    await saveNotificationSettings(updated);
+    await scheduleNotifications();
+  };
+
+  const handleNotifTimeChange = async (field: 'morningTime' | 'eveningTime' | 'taskReminderTime', value: string) => {
+    const updated = { ...notifSettings, [field]: value };
+    setNotifSettings(updated);
+    await saveNotificationSettings(updated);
+    await scheduleNotifications();
   };
 
   const handleExport = async () => {
@@ -349,13 +415,83 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      {/* Notifications */}
+      <div className="bg-bg-card border border-border rounded-xl p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium text-text-secondary">Notifications</h3>
+            <p className="text-xs text-text-dim mt-0.5">
+              Reminders to journal and check tasks
+            </p>
+          </div>
+          {notifSupported ? (
+            <button
+              onClick={handleNotifToggle}
+              aria-label="Toggle notifications"
+              aria-pressed={notifSettings.enabled}
+              className={`relative w-12 h-6 rounded-full transition-colors flex-shrink-0 ${
+                notifSettings.enabled ? 'bg-accent-green' : 'bg-bg-hover'
+              }`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200 ${
+                notifSettings.enabled ? 'translate-x-6' : 'translate-x-0'
+              }`} />
+            </button>
+          ) : (
+            <span className="text-xs text-text-dim">Not supported</span>
+          )}
+        </div>
+
+        {notifSupported && notifPermission === 'denied' && (
+          <p className="text-xs text-red-400">
+            Notifications blocked. Enable them in your browser settings.
+          </p>
+        )}
+
+        {notifSettings.enabled && (
+          <div className="space-y-3 pt-2 border-t border-border">
+            <div className="flex items-center gap-3">
+              <span className="text-sm w-24 shrink-0">🌅 Morning</span>
+              <input
+                type="time"
+                value={notifSettings.morningTime}
+                onChange={e => handleNotifTimeChange('morningTime', e.target.value)}
+                className="flex-1 px-3 py-1.5 bg-bg-input border border-border rounded-lg text-sm text-text-secondary focus:border-accent-green focus:ring-1 focus:ring-accent-green transition-colors"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-sm w-24 shrink-0">🌙 Evening</span>
+              <input
+                type="time"
+                value={notifSettings.eveningTime}
+                onChange={e => handleNotifTimeChange('eveningTime', e.target.value)}
+                className="flex-1 px-3 py-1.5 bg-bg-input border border-border rounded-lg text-sm text-text-secondary focus:border-accent-green focus:ring-1 focus:ring-accent-green transition-colors"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-sm w-24 shrink-0">📋 Tasks</span>
+              <input
+                type="time"
+                value={notifSettings.taskReminderTime}
+                onChange={e => handleNotifTimeChange('taskReminderTime', e.target.value)}
+                className="flex-1 px-3 py-1.5 bg-bg-input border border-border rounded-lg text-sm text-text-secondary focus:border-accent-green focus:ring-1 focus:ring-accent-green transition-colors"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Save */}
+      {saveError && (
+        <p className="text-sm text-red-400 text-center">{saveError}</p>
+      )}
       <button
         onClick={handleSave}
+        disabled={isSaving}
         className="w-full py-3 bg-accent-green text-bg-primary font-semibold rounded-xl
-                   hover:bg-accent-green/90 transition-colors"
+                   hover:bg-accent-green/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
       >
-        {saved ? '✓ Saved!' : 'Save settings'}
+        {isSaving ? 'Saving...' : saved ? '✓ Saved!' : 'Save settings'}
       </button>
 
       {/* Data management */}

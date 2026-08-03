@@ -65,7 +65,7 @@ export interface AppSettings {
 export interface Task {
   id: string;
   text: string;
-  date: string; // YYYY-MM-DD — tasks are per-day
+  date: string; // YYYY-MM-DD — tasks are per-day (for 'daily' type)
   done: boolean;
   createdAt: string;
   doneAt?: string;
@@ -73,6 +73,28 @@ export interface Task {
   source?: 'manual' | 'extracted';
   /** Entry ID if extracted from a journal entry */
   entryId?: string;
+  /** Link back to template if auto-generated from a template */
+  templateId?: string;
+  /** ISO week key YYYY-Wxx for weekly task instances */
+  weekKey?: string;
+  /** Task type: 'daily' (per-day, default) | 'todo' (persists until done) */
+  type?: 'daily' | 'todo';
+  /** Optional due date for to-dos (YYYY-MM-DD) */
+  dueDate?: string;
+}
+
+export interface TaskTemplate {
+  id: string;
+  text: string;
+  /** 'preset' = daily time-of-day, 'weekly' = weekly frequency, 'oneoff' = created once */
+  type: 'preset' | 'weekly' | 'oneoff';
+  /** Time-of-day slot for preset tasks */
+  preset?: 'morning' | 'midday' | 'afternoon' | 'night';
+  /** How many completions needed per week (for weekly tasks) */
+  weekFrequency?: number;
+  createdAt: string;
+  /** Can be deactivated without deleting */
+  active: boolean;
 }
 
 export interface ContextMemory {
@@ -95,6 +117,7 @@ class DriftDB extends Dexie {
   rewards!: Table<Reward>;
   moods!: Table<MoodEntry>;
   tasks!: Table<Task>;
+  taskTemplates!: Table<TaskTemplate>;
   contextMemory!: Table<ContextMemory>;
   settings!: Table<AppSettings>;
 
@@ -111,8 +134,26 @@ class DriftDB extends Dexie {
       entryTags: 'id, entryId, taggedAt',
     });
     // v3: make entryId unique in entryTags to prevent duplicates
+    // NOTE: Dexie upgrade() callbacks run in the OLD schema context,
+    // so entryTags still has 'id' as primary key during this callback.
     this.version(3).stores({
       entryTags: 'entryId, taggedAt',
+    }).upgrade(async (tx) => {
+      // Deduplicate: keep the latest tag record per entryId
+      // Running in old schema context where 'id' is still the primary key
+      const tags = await tx.table('entryTags').toArray();
+      const seen = new Map<string, any>();
+      for (const tag of tags) {
+        const existing = seen.get(tag.entryId);
+        if (!existing || tag.taggedAt > existing.taggedAt) {
+          if (existing) {
+            await tx.table('entryTags').delete(existing.id);
+          }
+          seen.set(tag.entryId, tag);
+        } else {
+          await tx.table('entryTags').delete(tag.id);
+        }
+      }
     });
     // v4: add tasks table for daily task tracking
     this.version(4).stores({
@@ -125,6 +166,15 @@ class DriftDB extends Dexie {
     // v6: add entryId index to tasks (was missing in v4)
     this.version(6).stores({
       tasks: 'id, date, done, entryId',
+    });
+    // v7: add taskTemplates table for presets, weekly tasks
+    this.version(7).stores({
+      tasks: 'id, date, done, entryId, templateId, weekKey',
+      taskTemplates: 'id, type, active',
+    });
+    // v8: add type/dueDate to tasks for to-do support
+    this.version(8).stores({
+      tasks: 'id, date, done, entryId, templateId, weekKey, type, dueDate',
     });
 
   }
@@ -489,6 +539,7 @@ export async function exportAllData(): Promise<string> {
     rewards: await db.rewards.toArray(),
     moods: await db.moods.toArray(),
     tasks: await db.tasks.toArray(),
+    taskTemplates: await db.taskTemplates.toArray(),
     contextMemory: await db.contextMemory.toArray(),
     exportedAt: new Date().toISOString(),
   };
@@ -502,6 +553,7 @@ export async function clearAllData(): Promise<void> {
   await db.rewards.clear();
   await db.moods.clear();
   await db.tasks.clear();
+  await db.taskTemplates.clear();
   await db.contextMemory.clear();
   await db.settings.clear();
 }
@@ -571,10 +623,10 @@ export async function deleteTask(id: string): Promise<void> {
   await db.tasks.delete(id);
 }
 
-/** Get today's tasks. */
+/** Get today's tasks (excluding to-dos which persist across days). */
 export async function getTodaysTasks(): Promise<Task[]> {
   const today = localDateKey();
-  return db.tasks.where('date').equals(today).toArray();
+  return db.tasks.where('date').equals(today).filter(t => t.type !== 'todo').toArray();
 }
 
 /** Get tasks for a specific date. */
@@ -589,6 +641,330 @@ export async function getTodayTasksSummary(): Promise<string> {
   const done = tasks.filter(t => t.done).map(t => `✓ ${t.text}`);
   const open = tasks.filter(t => !t.done).map(t => `○ ${t.text}`);
   return [...open, ...done].join('\n');
+}
+
+// ─── Task Template helpers ─────────────────────────
+
+/** Get the ISO week key for a date (YYYY-Wxx). Weeks start on Monday. */
+export function getWeekKey(date: Date = new Date()): string {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7; // Sunday = 7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum); // Set to Thursday
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+/** Create a new task template. */
+export async function createTaskTemplate(
+  text: string,
+  type: TaskTemplate['type'],
+  preset?: TaskTemplate['preset'],
+  weekFrequency?: number,
+): Promise<TaskTemplate> {
+  const template: TaskTemplate = {
+    id: uuid(),
+    text,
+    type,
+    preset,
+    weekFrequency,
+    createdAt: new Date().toISOString(),
+    active: true,
+  };
+  await db.taskTemplates.add(template);
+  return template;
+}
+
+/** Get all active templates. */
+export async function getActiveTemplates(): Promise<TaskTemplate[]> {
+  return db.taskTemplates.filter(t => t.active).toArray();
+}
+
+/** Get templates by type. */
+export async function getTemplatesByType(type: TaskTemplate['type']): Promise<TaskTemplate[]> {
+  return db.taskTemplates.where('type').equals(type).filter(t => t.active).toArray();
+}
+
+/** Update a template. */
+export async function updateTaskTemplate(id: string, updates: Partial<TaskTemplate>): Promise<void> {
+  await db.taskTemplates.update(id, updates);
+}
+
+/** Deactivate (soft-delete) a template. */
+export async function deactivateTemplate(id: string): Promise<void> {
+  await db.taskTemplates.update(id, { active: false });
+}
+
+/** Move a task template to a different preset slot. */
+export async function moveTemplateToPreset(id: string, newPreset: TaskTemplate['preset']): Promise<void> {
+  await db.taskTemplates.update(id, { preset: newPreset });
+}
+
+/** Delete a template and all its task instances. */
+export async function deleteTaskTemplate(id: string): Promise<void> {
+  await db.transaction('rw', db.taskTemplates, db.tasks, async () => {
+    await db.taskTemplates.delete(id);
+    await db.tasks.where('templateId').equals(id).delete();
+  });
+}
+
+/**
+ * Ensure today's task instances exist for all active daily preset templates.
+ * Creates a Task for each preset template if one doesn't already exist for today.
+ */
+export async function ensureDailyPresetInstances(): Promise<void> {
+  const today = localDateKey();
+  const presets = await getTemplatesByType('preset');
+
+  for (const template of presets) {
+    const existing = await db.tasks
+      .where('templateId')
+      .equals(template.id)
+      .filter(t => t.date === today)
+      .first();
+    if (!existing) {
+      await db.tasks.add({
+        id: uuid(),
+        text: template.text,
+        date: today,
+        done: false,
+        createdAt: new Date().toISOString(),
+        source: 'manual',
+        templateId: template.id,
+      });
+    }
+  }
+}
+
+/**
+ * Ensure this week's task instances exist for all active weekly templates.
+ * For a template with weekFrequency=3, creates 3 task instances if <3 exist for this week.
+ */
+export async function ensureWeeklyTaskInstances(): Promise<void> {
+  const weekKey = getWeekKey();
+  const weeklyTemplates = await getTemplatesByType('weekly');
+
+  for (const template of weeklyTemplates) {
+    const frequency = template.weekFrequency ?? 1;
+    const existing = await db.tasks
+      .where('templateId')
+      .equals(template.id)
+      .filter(t => t.weekKey === weekKey)
+      .toArray();
+
+    // Create missing instances up to the frequency count
+    const toCreate = frequency - existing.length;
+    for (let i = 0; i < toCreate; i++) {
+      // Default to today's date for new instances
+      await db.tasks.add({
+        id: uuid(),
+        text: template.text,
+        date: localDateKey(),
+        done: false,
+        createdAt: new Date().toISOString(),
+        source: 'manual',
+        templateId: template.id,
+        weekKey,
+      });
+    }
+  }
+}
+
+/**
+ * Get this week's tasks for a weekly template, with completion stats.
+ */
+export async function getWeeklyTaskInstances(
+  templateId: string,
+): Promise<{ tasks: Task[]; done: number; total: number; frequency: number }> {
+  const weekKey = getWeekKey();
+  const template = await db.taskTemplates.get(templateId);
+  if (!template) return { tasks: [], done: 0, total: 0, frequency: 1 };
+
+  const tasks = await db.tasks
+    .where('templateId')
+    .equals(templateId)
+    .filter(t => t.weekKey === weekKey)
+    .toArray();
+
+  const frequency = template.weekFrequency ?? 1;
+  return {
+    tasks,
+    done: tasks.filter(t => t.done).length,
+    total: tasks.length,
+    frequency,
+  };
+}
+
+/**
+ * Get all active templates with their current week's instance status.
+ */
+export async function getTemplatesWithStatus(): Promise<{
+  presets: { template: TaskTemplate; instance?: Task }[];
+  weekly: { template: TaskTemplate; done: number; total: number; frequency: number }[];
+}> {
+  const today = localDateKey();
+  const weekKey = getWeekKey();
+
+  const allTemplates = await getActiveTemplates();
+
+  // Daily presets
+  const presetTemplates = allTemplates.filter(t => t.type === 'preset');
+  const presets = await Promise.all(
+    presetTemplates.map(async (template) => {
+      const instance = await db.tasks
+        .where('templateId')
+        .equals(template.id)
+        .filter(t => t.date === today)
+        .first();
+      return { template, instance };
+    }),
+  );
+
+  // Weekly tasks
+  const weeklyTemplates = allTemplates.filter(t => t.type === 'weekly');
+  const weekly = await Promise.all(
+    weeklyTemplates.map(async (template) => {
+      const tasks = await db.tasks
+        .where('templateId')
+        .equals(template.id)
+        .filter(t => t.weekKey === weekKey)
+        .toArray();
+      const frequency = template.weekFrequency ?? 1;
+      return {
+        template,
+        done: tasks.filter(t => t.done).length,
+        total: tasks.length,
+        frequency,
+      };
+    }),
+  );
+
+  return { presets, weekly };
+}
+
+// ─── To-Do helpers ─────────────────────────────────
+
+/** Create a to-do task (persists until done, optional due date). */
+export async function addTodo(text: string, dueDate?: string): Promise<Task> {
+  const task: Task = {
+    id: uuid(),
+    text,
+    date: localDateKey(), // creation date
+    done: false,
+    createdAt: new Date().toISOString(),
+    source: 'manual',
+    type: 'todo',
+    dueDate,
+  };
+  await db.tasks.add(task);
+  return task;
+}
+
+/** Get all open to-dos, sorted by due date (undated first, then by urgency). */
+export async function getOpenTodos(): Promise<Task[]> {
+  const todos = await db.tasks
+    .filter(t => t.type === 'todo' && !t.done)
+    .toArray();
+  return todos.sort((a, b) => {
+    // Undated to-dos come first
+    if (!a.dueDate && !b.dueDate) return a.createdAt.localeCompare(b.createdAt);
+    if (!a.dueDate) return -1;
+    if (!b.dueDate) return 1;
+    return a.dueDate.localeCompare(b.dueDate);
+  });
+}
+
+/** Get all to-dos (open + done). */
+export async function getAllTodos(): Promise<Task[]> {
+  return db.tasks
+    .filter(t => t.type === 'todo')
+    .toArray();
+}
+
+/** Check if a to-do is overdue (due date is before today). */
+export function isOverdue(dueDate?: string): boolean {
+  if (!dueDate) return false;
+  return dueDate < localDateKey();
+}
+
+/** Check if a to-do is due today. */
+export function isDueToday(dueDate?: string): boolean {
+  if (!dueDate) return false;
+  return dueDate === localDateKey();
+}
+
+/** Check if a to-do is due this week. */
+export function isDueThisWeek(dueDate?: string): boolean {
+  if (!dueDate) return false;
+  const today = new Date();
+  const endOfWeek = new Date(today);
+  endOfWeek.setDate(today.getDate() + (7 - today.getDay()));
+  return dueDate <= localDateKey(endOfWeek);
+}
+
+// ─── AI Nudge Summary ──────────────────────────────
+
+/**
+ * Build a task nudge summary for AI context.
+ * Includes undone daily tasks, overdue/upcoming to-dos, and stalling weekly tasks.
+ */
+export async function getTaskNudgeSummary(): Promise<string> {
+  const parts: string[] = [];
+  const today = localDateKey();
+
+  // 1. Undone daily tasks
+  const dailyTasks = await getTodaysTasks();
+  const undoneDaily = dailyTasks.filter(t => !t.done && !t.templateId);
+  if (undoneDaily.length > 0) {
+    parts.push(`Undone today: ${undoneDaily.map(t => t.text).join(', ')}`);
+  }
+
+  // 2. To-dos — overdue and due soon
+  const todos = await getOpenTodos();
+  const overdue = todos.filter(t => t.dueDate && t.dueDate < today);
+  const dueToday = todos.filter(t => t.dueDate === today);
+  const dueSoon = todos.filter(t => {
+    if (!t.dueDate || t.dueDate <= today) return false;
+    const diff = (new Date(t.dueDate).getTime() - new Date(today).getTime()) / 86400000;
+    return diff <= 3;
+  });
+
+  if (overdue.length > 0) {
+    parts.push(`Overdue to-dos: ${overdue.map(t => `${t.text} (due ${t.dueDate})`).join(', ')}`);
+  }
+  if (dueToday.length > 0) {
+    parts.push(`Due today: ${dueToday.map(t => t.text).join(', ')}`);
+  }
+  if (dueSoon.length > 0) {
+    parts.push(`Due this week: ${dueSoon.map(t => `${t.text} (due ${t.dueDate})`).join(', ')}`);
+  }
+
+  // 3. Weekly tasks — detect stalling
+  const weekKey = getWeekKey();
+  const weeklyTemplates = await getTemplatesByType('weekly');
+  for (const template of weeklyTemplates) {
+    const frequency = template.weekFrequency ?? 1;
+    const weekTasks = await db.tasks
+      .where('templateId')
+      .equals(template.id)
+      .filter(t => t.weekKey === weekKey)
+      .toArray();
+    const done = weekTasks.filter(t => t.done).length;
+    const remaining = frequency - done;
+
+    if (remaining > 0) {
+      // Check if it's late in the week (Thursday+) and still incomplete
+      const dayOfWeek = new Date().getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+      const isLateInWeek = dayOfWeek >= 4; // Thursday or later
+      if (isLateInWeek) {
+        parts.push(`Weekly stalling: "${template.text}" needs ${remaining} more ${remaining === 1 ? 'completion' : 'completions'} this week (${done}/${frequency})`);
+      } else if (remaining === frequency) {
+        parts.push(`Weekly not started: "${template.text}" — 0/${frequency} done so far`);
+      }
+    }
+  }
+
+  return parts.length > 0 ? parts.join('\n') : '';
 }
 
 // ─── Context Memory helpers ──────────────────────────

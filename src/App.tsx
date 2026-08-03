@@ -8,6 +8,7 @@ import DashboardPage from './pages/DashboardPage';
 import SettingsPage from './pages/SettingsPage';
 import Onboarding from './components/Onboarding';
 import { getApiKey } from './db';
+import { initNotifications } from './notifications';
 
 function Sidebar() {
   const [isOpen, setIsOpen] = useState(false);
@@ -62,7 +63,7 @@ function Sidebar() {
           <p className="text-xs text-text-muted mt-1">Your ADHD journal</p>
         </div>
 
-        <nav className="flex-1 px-2 space-y-1">
+        <nav aria-label="Primary navigation" className="flex-1 px-2 space-y-1">
           {links.map(link => (
             <NavLink
               key={link.to}
@@ -77,7 +78,7 @@ function Sidebar() {
                 }
               `}
             >
-              <span className="text-lg">{link.icon}</span>
+              <span className="text-lg" aria-hidden="true">{link.icon}</span>
               <span>{link.label}</span>
             </NavLink>
           ))}
@@ -107,34 +108,56 @@ function Layout({ children }: { children: React.ReactNode }) {
 export default function App() {
   const [ready, setReady] = useState(false);
   const [hasApiKey, setHasApiKey] = useState(false);
+  const [initError, setInitError] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     const timeout = setTimeout(() => {
-      console.warn('Drift: DB init timed out — clearing service worker cache');
-      navigator.serviceWorker?.getRegistrations?.().then(regs =>
-        regs.forEach(r => r.unregister()),
-      );
-      caches.keys().then(names => names.forEach(c => caches.delete(c)));
-      setHasApiKey(false);
-      setReady(true);
-    }, 5000);
+      if (!cancelled) {
+        console.warn('Drift: DB init timed out — showing error state');
+        setInitError(true);
+        setReady(true);
+      }
+    }, 8000);
 
     getApiKey().then(key => {
       clearTimeout(timeout);
+      if (cancelled) return;
       setHasApiKey(!!key);
       setReady(true);
+      // Initialize notifications after app is ready
+      initNotifications().catch(() => {});
     }).catch(err => {
       console.error('Drift: failed to load API key', err);
       clearTimeout(timeout);
+      if (cancelled) return;
       setHasApiKey(false);
       setReady(true);
     });
+
+    return () => { cancelled = true; clearTimeout(timeout); };
   }, []);
 
   if (!ready) {
     return (
       <div className="min-h-screen bg-bg-primary flex items-center justify-center">
         <div className="text-text-muted animate-pulse-gentle">Loading Drift...</div>
+      </div>
+    );
+  }
+
+  if (initError) {
+    return (
+      <div className="min-h-screen bg-bg-primary flex items-center justify-center">
+        <div className="text-center space-y-4">
+          <p className="text-text-secondary">Drift had trouble starting up.</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-4 py-2 bg-accent-green text-bg-primary rounded-xl text-sm font-medium hover:bg-accent-green/90 transition-colors"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
@@ -153,6 +176,13 @@ export default function App() {
           <Route path="/coach" element={<CoachPage />} />
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="*" element={
+            <div className="text-center py-16">
+              <p className="text-2xl mb-2">🔍</p>
+              <p className="text-text-secondary mb-4">Page not found</p>
+              <a href="/" className="text-accent-green hover:underline text-sm">Go to Journal</a>
+            </div>
+          } />
         </Routes>
       </Layout>
     </BrowserRouter>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { createSession, addMessageToSession, endSession, getRecentEntries, getPersonality } from '../db';
+import { createSession, addMessageToSession, endSession, getRecentEntries, getPersonality, getTaskNudgeSummary } from '../db';
 import { streamChat } from '../ai/openrouter';
 import { buildCoachMessages, REQUEST_CONFIG, type CoachMode, type Personality } from '../ai/prompts';
 import { getModel, getApiKey } from '../db';
@@ -101,11 +101,17 @@ export default function CoachPage() {
         return;
       }
 
-      // Build context from recent entries
-      const recentEntries = await getRecentEntries(5);
-      const recentContext = recentEntries
+      // Build context from recent entries + task nudge
+      const [recentEntries, taskNudge] = await Promise.all([
+        getRecentEntries(5),
+        getTaskNudgeSummary(),
+      ]);
+      let recentContext = recentEntries
         .map(e => `[${e.created.split('T')[0]}] ${e.body.substring(0, 200)}`)
         .join('\n');
+      if (taskNudge) {
+        recentContext += `\n\n[Task status]\n${taskNudge}`;
+      }
 
       const chatMessages: Message[] = messagesRef.current.map(m => ({ role: m.role, content: m.content }));
       const apiMessages = buildCoachMessages(
