@@ -180,6 +180,20 @@ class DriftDB extends Dexie {
     this.version(8).stores({
       tasks: 'id, date, done, entryId, templateId, weekKey, type, dueDate',
     });
+    // v9: explicit full schema — defines ALL tables so Dexie sees the final state.
+    // Does NOT bypass old migrations (v3 still runs for databases below v3).
+    // Combined with error recovery that deletes DB on migration failure.
+    this.version(9).stores({
+      entries: 'id, created, mood, isDraft',
+      entryTags: 'entryId, taggedAt',
+      sessions: 'id, entryId, started',
+      rewards: 'id, type, earned',
+      moods: 'id, date, entryId',
+      tasks: 'id, date, done, entryId, templateId, weekKey, type, dueDate',
+      taskTemplates: 'id, type, active',
+      contextMemory: 'id',
+      settings: 'key',
+    });
 
   }
 }

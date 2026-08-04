@@ -155,7 +155,7 @@ export default function App() {
       console.error('Drift: failed to load API key', err);
       clearTimeout(timeout);
       if (cancelled) return;
-      setHasApiKey(false);
+      setInitError(true);
       setReady(true);
     });
 
