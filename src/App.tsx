@@ -86,7 +86,7 @@ function Sidebar() {
         </nav>
 
         <div className="px-4 mt-auto">
-          <p className="text-xs text-text-dim text-center">v0.5.0</p>
+          <p className="text-xs text-text-dim text-center">v0.5.1</p>
         </div>
       </aside>
     </>
