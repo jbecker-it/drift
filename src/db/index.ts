@@ -126,7 +126,7 @@ class DriftDB extends Dexie {
   settings!: Table<AppSettings>;
 
   constructor() {
-    super('drift');
+    super('drift-v2');
     this.version(1).stores({
       entries: 'id, created, mood, isDraft',
       sessions: 'id, entryId, started',
