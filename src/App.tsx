@@ -185,12 +185,38 @@ export default function App() {
       <div className="min-h-screen bg-bg-primary flex items-center justify-center">
         <div className="text-center space-y-4">
           <p className="text-text-secondary">Drift had trouble starting up.</p>
-          <button
-            onClick={() => window.location.reload()}
-            className="px-4 py-2 bg-accent-green text-bg-primary rounded-xl text-sm font-medium hover:bg-accent-green/90 transition-colors"
-          >
-            Retry
-          </button>
+          <p className="text-xs text-text-dim">This can happen with a stale service worker or database migration error.</p>
+          <div className="flex flex-col gap-2 items-center">
+            <button
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 bg-accent-green text-bg-primary rounded-xl text-sm font-medium hover:bg-accent-green/90 transition-colors"
+            >
+              Retry
+            </button>
+            <button
+              onClick={async () => {
+                try {
+                  if ('serviceWorker' in navigator) {
+                    const regs = await navigator.serviceWorker.getRegistrations();
+                    await Promise.all(regs.map(r => r.unregister()));
+                  }
+                  if ('caches' in window) {
+                    const names = await caches.keys();
+                    await Promise.all(names.map(n => caches.delete(n)));
+                  }
+                  const { default: Dexie } = await import('dexie');
+                  await Dexie.delete('drift');
+                } catch (err) {
+                  console.error('Reset failed:', err);
+                }
+                window.location.reload();
+              }}
+              className="px-4 py-2 bg-red-500/20 border border-red-500/30 text-red-400 rounded-xl text-sm font-medium hover:bg-red-500/30 transition-colors"
+            >
+              Reset local data &amp; reload
+            </button>
+            <p className="text-[10px] text-text-dim">This deletes all local journal data. Export first if possible.</p>
+          </div>
         </div>
       </div>
     );
