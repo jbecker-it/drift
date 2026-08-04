@@ -1226,13 +1226,17 @@ export async function createTaskTemplate(
         .where('type').equals('preset')
         .filter(t => t.preset === preset && t.active)
         .toArray();
-      order = existing.length;
+      order = existing.length > 0
+        ? Math.max(...existing.map(t => t.order ?? 0)) + 1
+        : 0;
     } else if (type === 'weekly') {
       const existing = await db.taskTemplates
         .where('type').equals('weekly')
         .filter(t => t.active)
         .toArray();
-      order = existing.length;
+      order = existing.length > 0
+        ? Math.max(...existing.map(t => t.order ?? 0)) + 1
+        : 0;
     }
     template.order = order;
     await db.taskTemplates.add(template);
@@ -1288,38 +1292,38 @@ export async function reorderTemplate(id: string, direction: 'up' | 'down'): Pro
     .filter(t => t.preset === template.preset && t.active)
     .toArray();
 
-  // If all have same/undefined order, assign sequential values first
-  const uniqueOrders = new Set(siblings.map(t => t.order ?? 0));
-  if (uniqueOrders.size <= 1) {
-    siblings.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    for (let i = 0; i < siblings.length; i++) {
-      await db.taskTemplates.update(siblings[i].id, { order: i, updatedAt: new Date().toISOString() });
+  // Atomic: normalize + reorder in one transaction
+  await db.transaction('rw', db.taskTemplates, async () => {
+    // Normalize: ensure unique sequential order values
+    const orders = siblings.map(t => t.order ?? 0);
+    const hasDuplicates = new Set(orders).size !== orders.length;
+    const allSame = new Set(orders).size <= 1;
+    if (hasDuplicates || allSame) {
+      siblings.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      for (let i = 0; i < siblings.length; i++) {
+        await db.taskTemplates.update(siblings[i].id, { order: i, updatedAt: new Date().toISOString() });
+      }
     }
-  }
 
-  // Re-fetch after potential reassignment
-  const refreshed = await db.taskTemplates
-    .where('type').equals('preset')
-    .filter(t => t.preset === template.preset && t.active)
-    .toArray();
-  refreshed.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    // Re-sort after normalization
+    siblings.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
-  const idx = refreshed.findIndex(t => t.id === id);
-  if (idx === -1) return;
+    const idx = siblings.findIndex(t => t.id === id);
+    if (idx === -1) return;
 
-  const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
-  if (swapIdx < 0 || swapIdx >= refreshed.length) return;
+    const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= siblings.length) return;
 
-  // Move: take item out, insert at new position, reassign all order values
-  const [moved] = refreshed.splice(idx, 1);
-  refreshed.splice(swapIdx, 0, moved);
+    // Move: take item out, insert at new position, reassign all order values
+    const [moved] = siblings.splice(idx, 1);
+    siblings.splice(swapIdx, 0, moved);
 
-  // Assign sequential order values to entire slot
-  for (let i = 0; i < refreshed.length; i++) {
-    if (refreshed[i].order !== i) {
-      await db.taskTemplates.update(refreshed[i].id, { order: i, updatedAt: new Date().toISOString() });
+    // Assign sequential order values to entire slot
+    const toUpdate = siblings.filter((t, i) => t.order !== i);
+    if (toUpdate.length > 0) {
+      await db.taskTemplates.bulkPut(toUpdate.map((t, i) => ({ ...t, order: i, updatedAt: new Date().toISOString() })));
     }
-  }
+  });
 }
 
 /** Delete a template and all its task instances. Records tombstones for sync. */
@@ -1459,9 +1463,9 @@ export async function getTemplatesWithStatus(): Promise<{
 
   const allTemplates = await getActiveTemplates();
 
-  // Daily presets (sorted by order)
+  // Daily presets (sorted by order, then by creation date for stability)
   const presetTemplates = allTemplates.filter(t => t.type === 'preset')
-    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt.localeCompare(b.createdAt));
   const presets = await Promise.all(
     presetTemplates.map(async (template) => {
       const instance = await db.tasks
@@ -1473,8 +1477,9 @@ export async function getTemplatesWithStatus(): Promise<{
     }),
   );
 
-  // Weekly tasks
-  const weeklyTemplates = allTemplates.filter(t => t.type === 'weekly');
+  // Weekly tasks (sorted by order for consistency)
+  const weeklyTemplates = allTemplates.filter(t => t.type === 'weekly')
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt.localeCompare(b.createdAt));
   const weekly = await Promise.all(
     weeklyTemplates.map(async (template) => {
       const tasks = await db.tasks
