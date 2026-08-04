@@ -616,6 +616,298 @@ export async function clearAllData(): Promise<void> {
   await db.settings.clear();
 }
 
+// ─── Old DB Detection & Restore ─────────────────────
+//
+// Uses raw IndexedDB API to read the old 'drift' database.
+// This is CRITICAL because:
+//  - Dexie cannot open a DB at a higher version than declared
+//  - Dexie cannot change primary keys (v3 tried, failed)
+//  - We need to read data regardless of which version the old DB is stuck at
+
+/** Tables we expect in the old 'drift' database. */
+const OLD_DB_TABLES = ['entries', 'entryTags', 'sessions', 'rewards', 'moods', 'settings'];
+
+/** Primary key name for each table in the old schema. */
+const OLD_DB_PRIMARY_KEY: Record<string, string> = {
+  entries: 'id',
+  entryTags: 'id',   // old schema used 'id', not 'entryId'
+  sessions: 'id',
+  rewards: 'id',
+  moods: 'id',
+  settings: 'key',
+};
+
+/**
+ * Read all records from a raw IndexedDB object store.
+ * Returns a promise that resolves with an array of structured-clone'd records.
+ */
+function readRawStore(
+  db: IDBDatabase,
+  storeName: string,
+): Promise<any[]> {
+  return new Promise((resolve, reject) => {
+    try {
+      if (!db.objectStoreNames.contains(storeName)) {
+        return resolve([]);
+      }
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const req = store.getAll();
+      req.onsuccess = () => resolve(req.result ?? []);
+      req.onerror = () => resolve([]); // Non-fatal — table might be empty or missing
+    } catch {
+      resolve([]);
+    }
+  });
+}
+
+/**
+ * Open the old 'drift' database using raw IndexedDB (no Dexie, no migrations).
+ * Returns the IDBDatabase handle, or null if the DB doesn't exist.
+ */
+function openOldDriftDB(): Promise<IDBDatabase | null> {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open('drift');
+      req.onsuccess = () => {
+        const idb = req.result;
+        // Safety: only accept databases that have tables we recognise
+        const storeNames = Array.from(idb.objectStoreNames);
+        if (storeNames.length === 0) {
+          idb.close();
+          return resolve(null);
+        }
+        resolve(idb);
+      };
+      req.onerror = () => resolve(null);
+      req.onabort = () => resolve(null);
+      req.onblocked = () => resolve(null);
+      // If the DB doesn't exist yet, onupgradeneeded fires — just close it.
+      req.onupgradeneeded = (event) => {
+        // New DB — nothing to read. Abort the upgrade to prevent creating
+        // a phantom empty 'drift' database that would persist forever.
+        event.target?.transaction?.abort();
+      };
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * Check if an old 'drift' database exists with data.
+ * Returns entry count and per-table counts so the UI can show what's available.
+ * Safe for any DB version (v1, v2, v3+, or corrupted).
+ */
+export async function checkOldDatabase(): Promise<{
+  hasData: boolean;
+  entryCount: number;
+  tableCounts: Record<string, number>;
+}> {
+  const idb = await openOldDriftDB();
+  if (!idb) return { hasData: false, entryCount: 0, tableCounts: {} };
+
+  try {
+    const tableCounts: Record<string, number> = {};
+    for (const table of OLD_DB_TABLES) {
+      if (!idb.objectStoreNames.contains(table)) {
+        tableCounts[table] = 0;
+        continue;
+      }
+      const count = await new Promise<number>((resolve) => {
+        try {
+          const tx = idb.transaction(table, 'readonly');
+          const req = tx.objectStore(table).count();
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => resolve(0);
+        } catch {
+          resolve(0);
+        }
+      });
+      tableCounts[table] = count;
+    }
+
+    const entryCount = tableCounts.entries || 0;
+    return { hasData: entryCount > 0, entryCount, tableCounts };
+  } finally {
+    idb.close();
+  }
+}
+
+/**
+ * Read all data from the old 'drift' database for backup / restore.
+ * Uses raw IndexedDB — works regardless of which schema version the DB is stuck at.
+ * Returns null if no data found or if read fails.
+ */
+export async function readOldDatabase(): Promise<Record<string, any[]> | null> {
+  const idb = await openOldDriftDB();
+  if (!idb) return null;
+
+  try {
+    const data: Record<string, any[]> = {};
+    for (const table of OLD_DB_TABLES) {
+      data[table] = await readRawStore(idb, table);
+    }
+
+    const hasData = Object.values(data).some(arr => arr.length > 0);
+    return hasData ? data : null;
+  } catch {
+    return null;
+  } finally {
+    idb.close();
+  }
+}
+
+/** Tables that require a primary key field on each record for bulkPut. */
+const REQUIRED_PK: Record<string, string> = {
+  entries: 'id',
+  entryTags: 'entryId', // new schema: entryId is PK
+  sessions: 'id',
+  rewards: 'id',
+  moods: 'id',
+  tasks: 'id',
+  taskTemplates: 'id',
+  contextMemory: 'id',
+};
+
+/** Tables that participate in a single atomic import transaction. */
+const IMPORT_TABLES = [
+  'entries', 'entryTags', 'sessions', 'rewards',
+  'moods', 'tasks', 'taskTemplates', 'contextMemory',
+] as const;
+
+/**
+ * Import data from a JSON string into the current database.
+ * Handles export format (from exportAllData / WebDAV sync) and old DB format.
+ * - Deduplicates entryTags by entryId (keeps the latest taggedAt).
+ * - Validates primary keys before bulkPut.
+ * - Wraps everything in a single Dexie transaction for atomicity.
+ * - Processes tombstones so deleted records stay deleted.
+ */
+export async function importFromJson(jsonString: string): Promise<{
+  success: boolean;
+  error?: string;
+  imported?: Record<string, number>;
+  tombstonesApplied?: number;
+}> {
+  try {
+    const data = JSON.parse(jsonString);
+    if (!data || typeof data !== 'object') {
+      return { success: false, error: 'Invalid JSON structure' };
+    }
+
+    // Pre-process: deduplicate entryTags, validate primary keys
+    const tableData: Record<string, any[]> = {};
+    for (const table of IMPORT_TABLES) {
+      if (!Array.isArray(data[table])) continue;
+
+      let records = data[table].filter((r: any) => r && typeof r === 'object');
+
+      // entryTags: deduplicate by entryId, keep the latest taggedAt
+      if (table === 'entryTags') {
+        const byEntryId = new Map<string, any>();
+        for (const r of records) {
+          if (!r.entryId) continue;
+          const existing = byEntryId.get(r.entryId);
+          if (!existing || !existing.taggedAt || (r.taggedAt && r.taggedAt > existing.taggedAt)) {
+            byEntryId.set(r.entryId, r);
+          }
+        }
+        records = Array.from(byEntryId.values());
+      }
+
+      // Validate: keep only records that have the required primary key
+      const pkField = REQUIRED_PK[table];
+      if (pkField) {
+        records = records.filter((r: any) => typeof r[pkField] === 'string' && r[pkField]);
+      }
+
+      if (records.length > 0) {
+        tableData[table] = records;
+      }
+    }
+
+    // Parse tombstones if present (from WebDAV sync payloads)
+    const tombstones: { table: string; recordId: string; deletedAt: string }[] =
+      Array.isArray(data.tombstones) ? data.tombstones : [];
+
+    // Atomic: import all tables + apply tombstones in a single transaction
+    const imported: Record<string, number> = {};
+    let tombstonesApplied = 0;
+
+    const dbTables = IMPORT_TABLES.map(t => (db as any)[t]).filter(Boolean);
+    // Also need settings for tombstone persistence
+    await db.transaction(
+      'rw',
+      [...dbTables, db.settings],
+      async () => {
+        // Apply tombstones first (deletions before insertions)
+        for (const ts of tombstones) {
+          if (!ts.table || !ts.recordId) continue;
+          const targetTable = (db as any)[ts.table];
+          if (!targetTable) continue;
+          try {
+            const existing = await targetTable.get(ts.recordId);
+            if (existing) {
+              // Only delete if tombstone is newer than the record
+              const recordTime = existing.updatedAt ?? existing.doneAt ?? existing.ended
+                ?? existing.lastUpdated ?? existing.taggedAt ?? existing.earned
+                ?? existing.started ?? existing.createdAt ?? existing.created ?? '';
+              if (!recordTime || ts.deletedAt >= recordTime) {
+                await targetTable.delete(ts.recordId);
+                tombstonesApplied++;
+              }
+            }
+          } catch {
+            // Table might not exist in current schema — skip
+          }
+        }
+
+        // Import records table by table
+        for (const table of IMPORT_TABLES) {
+          const records = tableData[table];
+          if (!records || records.length === 0) continue;
+          await (db as any)[table].bulkPut(records);
+          imported[table] = records.length;
+        }
+
+        // Persist tombstones locally so they survive push
+        if (tombstones.length > 0) {
+          const { getTombstones } = await import('../sync/webdavSync');
+          const { recordDeletions } = await import('../sync/webdavSync');
+          // Merge: local tombstones + imported tombstones (newer wins)
+          const localTombstones = await getTombstones();
+          const tombstoneMap = new Map<string, any>();
+          for (const lt of localTombstones) tombstoneMap.set(lt.id, lt);
+          for (const rt of tombstones) {
+            const id = `${rt.table}:${rt.recordId}`;
+            const existing = tombstoneMap.get(id);
+            if (!existing || rt.deletedAt > existing.deletedAt) {
+              tombstoneMap.set(id, {
+                id,
+                table: rt.table,
+                recordId: rt.recordId,
+                deletedAt: rt.deletedAt,
+              });
+            }
+          }
+          const merged = Array.from(tombstoneMap.values());
+          if (merged.length > 0) {
+            await setSetting('sync_tombstones', JSON.stringify(merged));
+          }
+        }
+      },
+    );
+
+    return { success: true, imported, tombstonesApplied };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to import data',
+    };
+  }
+}
+
 // ─── Entry tags helpers ──────────────────────────────
 
 export async function saveEntryTags(tags: Omit<EntryTags, 'id'>): Promise<EntryTags> {

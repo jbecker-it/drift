@@ -496,3 +496,40 @@ export async function performSync(): Promise<SyncStatus> {
   }
   return status;
 }
+
+// ─── Restore from WebDAV ───────────────────────────
+
+/**
+ * Fetch data from WebDAV server for restore purposes.
+ * Returns the raw JSON payload without merging — the caller decides
+ * whether to import it into the local DB.
+ */
+export async function fetchForRestore(config: SyncConfig): Promise<{
+  data: Record<string, any[]> | null;
+  error?: string;
+}> {
+  try {
+    const baseUrl = parseWebDAVUrl(config.serverUrl);
+    const response = await fetch(baseUrl.toString() + SYNC_FILE, {
+      method: 'GET',
+      headers: authHeaders(config),
+    });
+
+    if (response.status === 404) {
+      return { data: null, error: 'No backup found on server' };
+    }
+    if (!response.ok) {
+      return { data: null, error: `Server returned ${response.status}` };
+    }
+
+    const data = await response.json();
+
+    if (!validateRemotePayload(data)) {
+      return { data: null, error: 'Invalid data format on server' };
+    }
+
+    return { data };
+  } catch (err) {
+    return { data: null, error: err instanceof Error ? err.message : 'Connection failed' };
+  }
+}
