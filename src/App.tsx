@@ -205,6 +205,7 @@ export default function App() {
                     await Promise.all(names.map(n => caches.delete(n)));
                   }
                   const { default: Dexie } = await import('dexie');
+                  await Dexie.delete('drift');
                   await Dexie.delete('drift-v2');
                 } catch (err) {
                   console.error('Reset failed:', err);

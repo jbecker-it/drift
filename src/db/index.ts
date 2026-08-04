@@ -182,7 +182,9 @@ class DriftDB extends Dexie {
     });
     // v9: explicit full schema — defines ALL tables so Dexie sees the final state.
     // Does NOT bypass old migrations (v3 still runs for databases below v3).
-    // Combined with error recovery that deletes DB on migration failure.
+    // Database was renamed to drift-v2 (see App.tsx) because v3 tries to change
+    // entryTags primary key from id to entryId, which Dexie does not support.
+    // Fresh databases get v9 directly. Old drift DB is preserved but not loaded.
     this.version(9).stores({
       entries: 'id, created, mood, isDraft',
       entryTags: 'entryId, taggedAt',
