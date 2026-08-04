@@ -126,7 +126,12 @@ export default function App() {
 
     (async () => {
       try {
-        const key = await getApiKey();
+        // Retry getApiKey — DB may need a moment to initialize on first load
+        let key = await getApiKey();
+        if (!key && !disposed && !settled) {
+          await new Promise(r => setTimeout(r, 500));
+          key = await getApiKey();
+        }
         if (disposed || settled) return;
 
         // #36: Use pullFromServerSafe directly to capture conflict info.
@@ -168,10 +173,26 @@ export default function App() {
   // #37: Re-read the API key after onboarding completes to ensure consistency.
   const handleOnboardingComplete = useCallback(async () => {
     try {
-      const key = await getApiKey();
+      // Retry — DB write may not be immediately visible
+      let key = await getApiKey();
+      if (!key) {
+        await new Promise(r => setTimeout(r, 500));
+        key = await getApiKey();
+      }
+      if (!key) {
+        await new Promise(r => setTimeout(r, 1000));
+        key = await getApiKey();
+      }
       setHasApiKey(!!key);
     } catch {
-      setHasApiKey(true);
+      // If DB read fails, try once more after a delay
+      await new Promise(r => setTimeout(r, 500));
+      try {
+        const key = await getApiKey();
+        setHasApiKey(!!key);
+      } catch {
+        setHasApiKey(true);
+      }
     }
   }, []);
 
