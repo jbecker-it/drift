@@ -1282,23 +1282,44 @@ export async function reorderTemplate(id: string, direction: 'up' | 'down'): Pro
   const template = await db.taskTemplates.get(id);
   if (!template || template.type !== 'preset' || !template.preset) return;
 
-  // Get all active presets in the same slot, sorted by order
+  // Get all active presets in the same slot
   const siblings = await db.taskTemplates
     .where('type').equals('preset')
     .filter(t => t.preset === template.preset && t.active)
     .toArray();
-  siblings.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
-  const idx = siblings.findIndex(t => t.id === id);
+  // If all have same/undefined order, assign sequential values first
+  const uniqueOrders = new Set(siblings.map(t => t.order ?? 0));
+  if (uniqueOrders.size <= 1) {
+    siblings.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    for (let i = 0; i < siblings.length; i++) {
+      await db.taskTemplates.update(siblings[i].id, { order: i, updatedAt: new Date().toISOString() });
+    }
+  }
+
+  // Re-fetch after potential reassignment
+  const refreshed = await db.taskTemplates
+    .where('type').equals('preset')
+    .filter(t => t.preset === template.preset && t.active)
+    .toArray();
+  refreshed.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+  const idx = refreshed.findIndex(t => t.id === id);
   if (idx === -1) return;
 
   const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
-  if (swapIdx < 0 || swapIdx >= siblings.length) return;
+  if (swapIdx < 0 || swapIdx >= refreshed.length) return;
 
-  const neighbor = siblings[swapIdx];
-  const tmpOrder = template.order ?? 0;
-  await db.taskTemplates.update(id, { order: neighbor.order ?? 0, updatedAt: new Date().toISOString() });
-  await db.taskTemplates.update(neighbor.id, { order: tmpOrder, updatedAt: new Date().toISOString() });
+  // Move: take item out, insert at new position, reassign all order values
+  const [moved] = refreshed.splice(idx, 1);
+  refreshed.splice(swapIdx, 0, moved);
+
+  // Assign sequential order values to entire slot
+  for (let i = 0; i < refreshed.length; i++) {
+    if (refreshed[i].order !== i) {
+      await db.taskTemplates.update(refreshed[i].id, { order: i, updatedAt: new Date().toISOString() });
+    }
+  }
 }
 
 /** Delete a template and all its task instances. Records tombstones for sync. */
