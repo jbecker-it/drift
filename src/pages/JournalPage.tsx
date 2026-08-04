@@ -247,8 +247,9 @@ export default function JournalPage() {
         }).catch(() => {});
 
         // Award achievements (#12)
-        const totalEntries = (await db.entries.toArray()).filter(e => !e.isDraft).length;
-        const totalWords = (await db.entries.toArray()).filter(e => !e.isDraft).reduce((s, e) => s + e.wordCount, 0);
+        const allNonDraft = (await db.entries.toArray()).filter(e => !e.isDraft);
+        const totalEntries = allNonDraft.length;
+        const totalWords = allNonDraft.reduce((s, e) => s + e.wordCount, 0);
         checkAndAwardAchievements(totalEntries, totalWords).catch(() => {});
       }
 
@@ -370,7 +371,7 @@ export default function JournalPage() {
       const [contextMemory, recentSummaries] = await Promise.all([
         getContextMemoryPrompt(),
         getEntrySummaries(5).then(summaries => {
-          const filtered = summaries.filter(s => !s.includes(entry.body.substring(0, 50)));
+          const filtered = summaries.filter(s => !s.toLowerCase().includes(entry.body.substring(0, 50).toLowerCase()));
           return filtered.length > 0 ? filtered.slice(0, 3).join('\n') : undefined;
         }),
       ]);

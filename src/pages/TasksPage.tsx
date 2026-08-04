@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   addTask, toggleTask, deleteTask, getTodaysTasks,
   addTodo, getOpenTodos, isOverdue, isDueToday, isDueThisWeek, moveTemplateToPreset,
+  reorderTemplate,
   createTaskTemplate, deleteTaskTemplate, getTemplatesWithStatus,
   ensureDailyPresetInstances, ensureWeeklyTaskInstances, getWeeklyTaskInstances,
   type Task, type TaskTemplate,
@@ -50,19 +51,18 @@ export default function TasksPage() {
 
   // Mutation lock — prevents overlapping loadAll calls
   const mutationLock = useRef(false);
+  const pendingReload = useRef(false);
 
   const customInputRef = useRef<HTMLInputElement>(null);
 
   const loadAll = useCallback(async () => {
-    if (mutationLock.current) return; // Skip if a mutation is already in progress
+    if (mutationLock.current) { pendingReload.current = true; return; }
     mutationLock.current = true;
     try {
       setError(null);
-      // Auto-create instances from templates
       await ensureDailyPresetInstances();
       await ensureWeeklyTaskInstances();
 
-      // Load data
       const today = await getTodaysTasks();
       setCustomTasks(today.filter(t => !t.templateId && t.type !== 'todo').sort((a, b) => {
         if (a.done !== b.done) return a.done ? 1 : -1;
@@ -80,6 +80,10 @@ export default function TasksPage() {
     } finally {
       setIsLoading(false);
       mutationLock.current = false;
+      if (pendingReload.current) {
+        pendingReload.current = false;
+        loadAll();
+      }
     }
   }, []);
 
@@ -149,6 +153,11 @@ export default function TasksPage() {
   const handleMovePreset = async (templateId: string, newPreset: TaskTemplate['preset']) => {
     await moveTemplateToPreset(templateId, newPreset);
     setOpenMoveMenu(null);
+    await loadAll();
+  };
+
+  const handleReorder = async (templateId: string, direction: 'up' | 'down') => {
+    await reorderTemplate(templateId, direction);
     await loadAll();
   };
 
@@ -280,7 +289,7 @@ export default function TasksPage() {
                   )}
                 </div>
                 <div className="space-y-1.5">
-                  {items.map(({ template, instance }) => (
+                  {items.map(({ template, instance }, idx) => (
                     <div
                       key={template.id}
                       className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-all ${
@@ -310,6 +319,22 @@ export default function TasksPage() {
                       }`}>
                         {template.text}
                       </span>
+
+                      {/* Reorder buttons */}
+                      <div className="flex flex-col shrink-0">
+                        <button
+                          onClick={() => handleReorder(template.id, 'up')}
+                          disabled={idx === 0}
+                          aria-label={`Move "${template.text}" up`}
+                          className="text-text-dim hover:text-text-secondary transition-colors text-xs leading-none px-1 py-0.5 disabled:opacity-20 disabled:cursor-default"
+                        >▲</button>
+                        <button
+                          onClick={() => handleReorder(template.id, 'down')}
+                          disabled={idx === items.length - 1}
+                          aria-label={`Move "${template.text}" down`}
+                          className="text-text-dim hover:text-text-secondary transition-colors text-xs leading-none px-1 py-0.5 disabled:opacity-20 disabled:cursor-default"
+                        >▼</button>
+                      </div>
 
                       {/* Move to segment (keyboard accessible) */}
                       <div className="relative shrink-0" data-move-menu>
@@ -812,11 +837,11 @@ function WeeklyCheckboxes({
 
   return (
     <div className="flex gap-2 pl-9">
-      {tasks.map(task => (
+      {tasks.map((task, i) => (
         <button
           key={task.id}
           onClick={() => onToggle(task)}
-          aria-label={task.done ? `Mark instance as not done` : `Mark instance as done`}
+          aria-label={task.done ? `Mark completion ${i + 1} as not done` : `Mark completion ${i + 1} as done`}
           className={`w-10 h-10 rounded-lg border-2 flex items-center justify-center transition-all text-sm ${
             task.done
               ? 'bg-accent-green border-accent-green text-bg-primary'

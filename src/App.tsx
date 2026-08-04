@@ -7,6 +7,7 @@ import CoachPage from './pages/CoachPage';
 import DashboardPage from './pages/DashboardPage';
 import SettingsPage from './pages/SettingsPage';
 import Onboarding from './components/Onboarding';
+import UpdateBanner from './components/UpdateBanner';
 import { getApiKey } from './db';
 import { initNotifications } from './notifications';
 import { isSyncEnabled, pullFromServerSafe } from './sync/webdavSync';
@@ -86,7 +87,7 @@ function Sidebar() {
         </nav>
 
         <div className="px-4 mt-auto">
-          <p className="text-xs text-text-dim text-center">v0.5.5</p>
+          <p className="text-xs text-text-dim text-center">v{__APP_VERSION__}</p>
         </div>
       </aside>
     </>
@@ -253,6 +254,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
+      <UpdateBanner />
       <Layout>
         <Routes>
           <Route path="/" element={<JournalPage />} />

@@ -93,9 +93,11 @@ export interface TaskTemplate {
   /** 'preset' = daily time-of-day, 'weekly' = weekly frequency, 'oneoff' = created once */
   type: 'preset' | 'weekly' | 'oneoff';
   /** Time-of-day slot for preset tasks */
-  preset?: 'morning' | 'midday' | 'afternoon' | 'night';
+  preset?: 'morning' | 'midday' | 'afternoon' | 'night' | 'anytime';
   /** How many completions needed per week (for weekly tasks) */
   weekFrequency?: number;
+  /** Sort order within the preset slot */
+  order: number;
   createdAt: string;
   updatedAt?: string;
   /** Can be deactivated without deleting */
@@ -196,6 +198,35 @@ class DriftDB extends Dexie {
       taskTemplates: 'id, type, active',
       contextMemory: 'id',
       settings: 'key',
+    });
+    // v10: add order field to taskTemplates for sort ordering
+    this.version(10).stores({
+      entries: 'id, created, mood, isDraft',
+      entryTags: 'entryId, taggedAt',
+      sessions: 'id, entryId, started',
+      rewards: 'id, type, earned',
+      moods: 'id, date, entryId',
+      tasks: 'id, date, done, entryId, templateId, weekKey, type, dueDate',
+      taskTemplates: 'id, type, active',
+      contextMemory: 'id',
+      settings: 'key',
+    }).upgrade(async (tx) => {
+      // Backfill order field for existing templates
+      const templates = await tx.table('taskTemplates').toArray();
+      // Group by type + preset slot (skip oneoff — they don't use ordering)
+      const bySlot = new Map<string, any[]>();
+      for (const t of templates) {
+        if (t.type === 'oneoff') continue;
+        const slot = t.type === 'preset' ? (t.preset || 'anytime') : 'weekly';
+        if (!bySlot.has(slot)) bySlot.set(slot, []);
+        bySlot.get(slot)!.push(t);
+      }
+      for (const [, items] of bySlot) {
+        items.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        for (let i = 0; i < items.length; i++) {
+          await tx.table('taskTemplates').update(items[i].id, { order: i });
+        }
+      }
     });
 
   }
@@ -934,10 +965,17 @@ export async function getEntrySummaries(limit: number = 14): Promise<string[]> {
     .reverse()
     .limit(limit * 2)
     .toArray();
+  const filteredTags = tags.filter(t => t.one_line_summary).slice(0, limit * 2);
+
+  // Batch-fetch all entries in one query
+  const entryIds = filteredTags.map(t => t.entryId);
+  const entries = await db.entries.where('id').anyOf(entryIds).toArray();
+  const entryMap = new Map(entries.map(e => [e.id, e]));
+
   const results: string[] = [];
-  for (const tag of tags) {
+  for (const tag of filteredTags) {
     if (!tag.one_line_summary) continue;
-    const entry = await db.entries.get(tag.entryId);
+    const entry = entryMap.get(tag.entryId);
     const date = entry ? entry.created.split('T')[0] : tag.taggedAt.split('T')[0];
     results.push(`[${date}] ${tag.one_line_summary}`);
     if (results.length >= limit) break;
@@ -1024,6 +1062,124 @@ export async function getTodayTasksSummary(): Promise<string> {
   return [...open, ...done].join('\n');
 }
 
+// ─── Journal Task Groups ────────────────────────────
+
+export type JournalTaskSlot = 'morning' | 'midday' | 'afternoon' | 'night' | 'anytime';
+
+export interface JournalTaskGroup {
+  slot: JournalTaskSlot;
+  label: string;
+  icon: string;
+  items: JournalTaskItem[];
+}
+
+export interface JournalTaskItem {
+  /** Actual task instance id (for toggling/deleting) */
+  id: string;
+  text: string;
+  done: boolean;
+  /** For weekly tasks: progress info */
+  weekly?: { done: number; total: number; frequency: number };
+}
+
+/**
+ * Build grouped task data for the journal view.
+ * - Daily presets: grouped by their slot (morning/midday/afternoon/night/anytime)
+ * - Weekly tasks: deduplicated, shown once with remaining count
+ * - Custom/extracted tasks: shown under 'anytime'
+ */
+export async function getJournalTaskGroups(): Promise<JournalTaskGroup[]> {
+  await ensureDailyPresetInstances();
+  await ensureWeeklyTaskInstances();
+
+  const today = localDateKey();
+  const weekKey = getWeekKey();
+
+  const SLOT_META: Record<JournalTaskSlot, { label: string; icon: string }> = {
+    morning:   { label: 'Morning',   icon: '🌅' },
+    midday:    { label: 'Midday',    icon: '☀️' },
+    afternoon: { label: 'Afternoon', icon: '🌤️' },
+    night:     { label: 'Night',     icon: '🌙' },
+    anytime:   { label: 'Anytime',   icon: '📋' },
+  };
+
+  const SLOT_ORDER: JournalTaskSlot[] = ['morning', 'midday', 'afternoon', 'night', 'anytime'];
+
+  // 1. Daily presets — one instance per template (sorted by order)
+  const presetTemplates = (await getTemplatesByType('preset'))
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const slotMap = new Map<JournalTaskSlot, JournalTaskItem[]>();
+  for (const slot of SLOT_ORDER) slotMap.set(slot, []);
+
+  for (const template of presetTemplates) {
+    const slot = template.preset || 'anytime';
+    const instance = await db.tasks
+      .where('templateId')
+      .equals(template.id)
+      .filter(t => t.date === today)
+      .first();
+    // Skip if no instance exists (ensureDailyPresetInstances should have created one)
+    if (!instance) continue;
+    slotMap.get(slot)!.push({
+      id: instance.id,
+      text: template.text,
+      done: instance.done,
+      weekly: undefined,
+    });
+  }
+
+  // 2. Weekly tasks — deduplicated by template
+  const weeklyTemplates = (await getTemplatesByType('weekly'))
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const anytimeItems = slotMap.get('anytime')!;
+
+  for (const template of weeklyTemplates) {
+    const frequency = template.weekFrequency ?? 1;
+    const weekTasks = await db.tasks
+      .where('templateId')
+      .equals(template.id)
+      .filter(t => t.weekKey === weekKey)
+      .toArray();
+    const done = weekTasks.filter(t => t.done).length;
+    const isComplete = done >= frequency;
+
+    const undoneInstance = weekTasks.find(t => !t.done) ?? weekTasks[0];
+
+    anytimeItems.push({
+      id: undoneInstance?.id ?? template.id,
+      text: template.text,
+      done: isComplete,
+      weekly: { done, total: weekTasks.length, frequency },
+    });
+  }
+
+  // 3. Custom/extracted tasks — under 'anytime'
+  const allTodayTasks = await getTodaysTasks();
+  const customTasks = allTodayTasks.filter(t => !t.templateId && t.type !== 'todo');
+  for (const task of customTasks) {
+    anytimeItems.push({
+      id: task.id,
+      text: task.text,
+      done: task.done,
+    });
+  }
+
+  // Build result — only include non-empty groups, always show anytime
+  const groups: JournalTaskGroup[] = [];
+  for (const slot of SLOT_ORDER) {
+    const items = slotMap.get(slot)!;
+    if (items.length === 0 && slot !== 'anytime') continue;
+    groups.push({
+      slot,
+      label: SLOT_META[slot].label,
+      icon: SLOT_META[slot].icon,
+      items,
+    });
+  }
+
+  return groups;
+}
+
 // ─── Task Template helpers ─────────────────────────
 
 /** Get the ISO week key for a date (YYYY-Wxx). Weeks start on Monday. */
@@ -1049,10 +1205,31 @@ export async function createTaskTemplate(
     type,
     preset,
     weekFrequency,
+    order: 0,
     createdAt: new Date().toISOString(),
     active: true,
   };
-  await db.taskTemplates.add(template);
+
+  // Atomic: count existing + insert in one transaction to avoid race conditions
+  await db.transaction('rw', db.taskTemplates, async () => {
+    let order = 0;
+    if (type === 'preset' && preset) {
+      const existing = await db.taskTemplates
+        .where('type').equals('preset')
+        .filter(t => t.preset === preset && t.active)
+        .toArray();
+      order = existing.length;
+    } else if (type === 'weekly') {
+      const existing = await db.taskTemplates
+        .where('type').equals('weekly')
+        .filter(t => t.active)
+        .toArray();
+      order = existing.length;
+    }
+    template.order = order;
+    await db.taskTemplates.add(template);
+  });
+
   return template;
 }
 
@@ -1076,9 +1253,44 @@ export async function deactivateTemplate(id: string): Promise<void> {
   await db.taskTemplates.update(id, { active: false, updatedAt: new Date().toISOString() });
 }
 
-/** Move a task template to a different preset slot. */
+/** Move a task template to a different preset slot. Assigns order at end of new slot. */
 export async function moveTemplateToPreset(id: string, newPreset: TaskTemplate['preset']): Promise<void> {
-  await db.taskTemplates.update(id, { preset: newPreset, updatedAt: new Date().toISOString() });
+  const existing = await db.taskTemplates
+    .where('type').equals('preset')
+    .filter(t => t.preset === newPreset && t.active && t.id !== id)
+    .toArray();
+  await db.taskTemplates.update(id, {
+    preset: newPreset,
+    order: existing.length,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * Reorder a template within its preset slot.
+ * Swaps the order values between the template and its neighbor in the given direction.
+ */
+export async function reorderTemplate(id: string, direction: 'up' | 'down'): Promise<void> {
+  const template = await db.taskTemplates.get(id);
+  if (!template || template.type !== 'preset' || !template.preset) return;
+
+  // Get all active presets in the same slot, sorted by order
+  const siblings = await db.taskTemplates
+    .where('type').equals('preset')
+    .filter(t => t.preset === template.preset && t.active)
+    .toArray();
+  siblings.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+  const idx = siblings.findIndex(t => t.id === id);
+  if (idx === -1) return;
+
+  const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+  if (swapIdx < 0 || swapIdx >= siblings.length) return;
+
+  const neighbor = siblings[swapIdx];
+  const tmpOrder = template.order ?? 0;
+  await db.taskTemplates.update(id, { order: neighbor.order ?? 0, updatedAt: new Date().toISOString() });
+  await db.taskTemplates.update(neighbor.id, { order: tmpOrder, updatedAt: new Date().toISOString() });
 }
 
 /** Delete a template and all its task instances. Records tombstones for sync. */
@@ -1104,24 +1316,30 @@ export async function deleteTaskTemplate(id: string): Promise<void> {
 export async function ensureDailyPresetInstances(): Promise<void> {
   const today = localDateKey();
   const presets = await getTemplatesByType('preset');
+  if (presets.length === 0) return;
 
-  for (const template of presets) {
-    const existing = await db.tasks
-      .where('templateId')
-      .equals(template.id)
-      .filter(t => t.date === today)
-      .first();
-    if (!existing) {
-      await db.tasks.add({
-        id: uuid(),
-        text: template.text,
-        date: today,
-        done: false,
-        createdAt: new Date().toISOString(),
-        source: 'manual',
-        templateId: template.id,
-      });
-    }
+  // Single query: get all today's tasks that have a templateId
+  const todayTasks = await db.tasks
+    .where('date').equals(today)
+    .filter(t => !!t.templateId)
+    .toArray();
+  const existingByTemplate = new Set(todayTasks.map(t => t.templateId));
+
+  // Only create instances for templates that don't have one today
+  const toCreate = presets
+    .filter(t => !existingByTemplate.has(t.id))
+    .map(template => ({
+      id: uuid(),
+      text: template.text,
+      date: today,
+      done: false,
+      createdAt: new Date().toISOString(),
+      source: 'manual' as const,
+      templateId: template.id,
+    }));
+
+  if (toCreate.length > 0) {
+    await db.tasks.bulkAdd(toCreate);
   }
 }
 
@@ -1132,30 +1350,46 @@ export async function ensureDailyPresetInstances(): Promise<void> {
 export async function ensureWeeklyTaskInstances(): Promise<void> {
   const weekKey = getWeekKey();
   const weeklyTemplates = await getTemplatesByType('weekly');
+  if (weeklyTemplates.length === 0) return;
+
+  // Single query: get all this week's tasks that have a templateId
+  const weekTasks = await db.tasks
+    .where('weekKey').equals(weekKey)
+    .filter(t => !!t.templateId)
+    .toArray();
+
+  // Group by templateId
+  const countByTemplate = new Map<string, number>();
+  for (const t of weekTasks) {
+    countByTemplate.set(t.templateId!, (countByTemplate.get(t.templateId!) || 0) + 1);
+  }
+
+  // Create missing instances for each template
+  const toCreate: { id: string; text: string; date: string; done: boolean; createdAt: string; source: 'manual'; templateId: string; weekKey: string }[] = [];
+  const today = localDateKey();
+  const now = new Date().toISOString();
 
   for (const template of weeklyTemplates) {
     const frequency = template.weekFrequency ?? 1;
-    const existing = await db.tasks
-      .where('templateId')
-      .equals(template.id)
-      .filter(t => t.weekKey === weekKey)
-      .toArray();
+    const existingCount = countByTemplate.get(template.id) || 0;
+    const missing = frequency - existingCount;
 
-    // Create missing instances up to the frequency count
-    const toCreate = frequency - existing.length;
-    for (let i = 0; i < toCreate; i++) {
-      // Default to today's date for new instances
-      await db.tasks.add({
+    for (let i = 0; i < missing; i++) {
+      toCreate.push({
         id: uuid(),
         text: template.text,
-        date: localDateKey(),
+        date: today,
         done: false,
-        createdAt: new Date().toISOString(),
+        createdAt: now,
         source: 'manual',
         templateId: template.id,
         weekKey,
       });
     }
+  }
+
+  if (toCreate.length > 0) {
+    await db.tasks.bulkAdd(toCreate);
   }
 }
 
@@ -1285,10 +1519,14 @@ export function isDueToday(dueDate?: string): boolean {
 /** Check if a to-do is due this week. */
 export function isDueThisWeek(dueDate?: string): boolean {
   if (!dueDate) return false;
+  const todayKey = localDateKey();
   const today = new Date();
   const endOfWeek = new Date(today);
-  endOfWeek.setDate(today.getDate() + (7 - today.getDay()));
-  return dueDate <= localDateKey(endOfWeek);
+  // Monday-based week to match getWeekKey (ISO week)
+  const dayOfWeek = today.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+  const daysUntilSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
+  endOfWeek.setDate(today.getDate() + daysUntilSunday);
+  return dueDate >= todayKey && dueDate <= localDateKey(endOfWeek);
 }
 
 // ─── AI Nudge Summary ──────────────────────────────

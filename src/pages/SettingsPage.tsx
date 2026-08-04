@@ -18,6 +18,7 @@ import {
   getLastSyncTime,
   type SyncConfig,
 } from '../sync/webdavSync';
+import { checkForUpdates, getCurrentVersion, type UpdateInfo } from '../utils/versionCheck';
 
 const PERSONALITIES = [
   { id: 'coach', label: 'Coach', icon: '🏆' },
@@ -37,6 +38,22 @@ export default function SettingsPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [showKey, setShowKey] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+
+  // ─── Update check state ───────────────────────────
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateChecked, setUpdateChecked] = useState(false);
+
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    try {
+      const info = await checkForUpdates(true);
+      setUpdateInfo(info);
+      setUpdateChecked(true);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
 
   // Notification settings
   const [notifSettings, setNotifSettings] = useState<NotificationSettings>({
@@ -246,7 +263,7 @@ export default function SettingsPage() {
     a.href = url;
     a.download = `drift-export-${new Date().toISOString().split('T')[0]}.json`;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const handleClear = async () => {
@@ -719,6 +736,36 @@ export default function SettingsPage() {
       >
         {isSaving ? 'Saving...' : saved ? '✓ Saved!' : 'Save settings'}
       </button>
+
+      {/* Updates */}
+      <div className="bg-bg-card border border-border rounded-xl p-5 space-y-4">
+        <h3 className="text-sm font-medium text-text-secondary">Updates</h3>
+        <p className="text-xs text-text-dim">Current version: v{getCurrentVersion()}</p>
+        <button
+          onClick={handleCheckUpdate}
+          disabled={checkingUpdate}
+          className="w-full py-2.5 border border-border rounded-xl text-sm text-text-secondary
+                     hover:bg-bg-hover transition-colors disabled:opacity-40"
+        >
+          {checkingUpdate ? '🔄 Checking...' : '🔄 Check for updates'}
+        </button>
+        {updateChecked && updateInfo && (
+          <div className={updateInfo.available
+            ? 'p-3 rounded-lg bg-accent-green/10 border border-accent-green/30 text-sm text-accent-green'
+            : 'p-3 rounded-lg bg-bg-hover border border-border text-sm text-text-muted'
+          }>
+            {updateInfo.available
+              ? `✓ v${updateInfo.latestVersion} is available! Check the banner at the bottom to update.`
+              : `✓ You're up to date (v${updateInfo.currentVersion})`
+            }
+          </div>
+        )}
+        {updateChecked && !updateInfo && (
+          <div className="p-3 rounded-lg bg-bg-hover border border-border text-sm text-text-muted">
+            Could not check for updates. Try again later.
+          </div>
+        )}
+      </div>
 
       {/* Data management */}
       <div className="bg-bg-card border border-border rounded-xl p-5 space-y-4">

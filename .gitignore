@@ -1,1 +1,5 @@
-node_modules/\ndist/\n.DS_Store
+node_modules/
+dist/
+.DS_Store
+drift-v*.tar.gz
+drift-v*.zip
