@@ -4,6 +4,7 @@ import {
   awardReward,
   getTodaysTasks, addTask, toggleTask, deleteTask, getTodayTasksSummary,
   getEntrySummaries, extractTasksFromTags, getTaskNudgeSummary, type Task,
+  getJournalTaskGroups, type JournalTaskGroup, type JournalWeeklyTask,
   type JournalEntry,
 } from '../db';
 import { streamChat } from '../ai/openrouter';
@@ -46,7 +47,8 @@ export default function JournalPage() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   // ─── Today's tasks ─────────────────────────────────
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [taskGroups, setTaskGroups] = useState<JournalTaskGroup[]>([]);
+  const [weeklyTasks, setWeeklyTasks] = useState<JournalWeeklyTask[]>([]);
   const [newTaskText, setNewTaskText] = useState('');
 
   // ─── Post-save reflection state ────────────────────
@@ -83,11 +85,9 @@ export default function JournalPage() {
   }, []);
 
   const loadTasks = useCallback(async () => {
-    const today = await getTodaysTasks();
-    setTasks([...today].sort((a, b) => {
-      if (a.done !== b.done) return a.done ? 1 : -1;
-      return a.createdAt.localeCompare(b.createdAt);
-    }));
+    const result = await getJournalTaskGroups();
+    setTaskGroups(result.groups);
+    setWeeklyTasks(result.weekly);
   }, []);
 
   useEffect(() => { loadEntries(); loadTasks(); }, [loadEntries, loadTasks]);
@@ -475,37 +475,50 @@ export default function JournalPage() {
         </div>
       )}
 
-      {/* ─── Today's tasks ─────────────────────────── */}
+      {/* ─── Today's tasks (grouped by time of day) ── */}
       <div className="bg-bg-card border border-border rounded-xl p-4">
         <h3 className="text-sm font-medium text-text-secondary mb-3">✅ Today's tasks</h3>
 
-        {/* Task list */}
-        {tasks.length > 0 && (
-          <div className="space-y-1.5 mb-3">
-            {tasks.map(task => (
-              <div
-                key={task.id}
-                className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
-                  task.done ? 'opacity-50' : 'hover:bg-bg-hover'
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  checked={task.done}
-                  onChange={async () => { await toggleTask(task.id); await loadTasks(); }}
-                  aria-label={`Mark "${task.text}" as ${task.done ? 'not done' : 'done'}`}
-                  className="w-4 h-4 rounded border-border text-accent-green focus:ring-accent-green"
-                />
-                <span className={`flex-1 text-sm ${task.done ? 'text-text-dim line-through' : 'text-text-primary'}`}>
-                  {task.text}
-                </span>
-                <button
-                  onClick={async (e) => { e.preventDefault(); await deleteTask(task.id); await loadTasks(); }}
-                  className="text-text-dim hover:text-red-400 transition-colors text-xs shrink-0"
-                  aria-label={`Delete task "${task.text}"`}
-                >
-                  ✕
-                </button>
+        {/* Daily task groups */}
+        {taskGroups.length > 0 && (
+          <div className="space-y-3 mb-3">
+            {taskGroups.map(group => (
+              <div key={group.slot}>
+                <div className="flex items-center gap-1.5 mb-1.5">
+                  <span className="text-sm" aria-hidden="true">{group.icon}</span>
+                  <span className="text-xs font-medium text-text-muted uppercase tracking-wide">{group.label}</span>
+                  {group.items.length > 0 && (
+                    <span className="text-xs text-text-dim ml-auto">
+                      {group.items.filter(i => i.done).length}/{group.items.length}
+                    </span>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  {group.items.map(item => (
+                    <div
+                      key={item.id}
+                      className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
+                        item.done ? 'opacity-50' : 'hover:bg-bg-hover'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={item.done}
+                        onChange={async () => { await toggleTask(item.id); await loadTasks(); }}
+                        aria-label={`Mark \"${item.text}\" as ${item.done ? 'not done' : 'done'}`}
+                        className="w-4 h-4 rounded border-border text-accent-green focus:ring-accent-green"
+                      />
+                      <span className={`flex-1 text-sm ${item.done ? 'text-text-dim line-through' : 'text-text-primary'}`}>
+                        {item.text}
+                      </span>
+                      <button
+                        onClick={async (e) => { e.preventDefault(); await deleteTask(item.id); await loadTasks(); }}
+                        className="text-text-dim hover:text-red-400 transition-colors text-xs shrink-0"
+                        aria-label={`Delete task \"${item.text}\"`}
+                      >✕</button>
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
@@ -525,7 +538,7 @@ export default function JournalPage() {
                 await loadTasks();
               }
             }}
-            placeholder={tasks.length === 0 ? 'Add a task for today...' : 'Add another task...'}
+            placeholder="Add a quick task..."
             className="flex-1 px-3 py-2 bg-transparent text-sm text-text-primary
                        placeholder:text-text-dim focus:outline-none"
           />
@@ -537,20 +550,43 @@ export default function JournalPage() {
                 await loadTasks();
               }}
               className="text-xs text-accent-green hover:text-accent-green/80 transition-colors shrink-0"
-            >
-              + Add
-            </button>
+            >+ Add</button>
           )}
         </div>
-
-        {tasks.length > 0 && (
-          <div className="mt-2 pt-2 border-t border-border">
-            <span className="text-xs text-text-dim">
-              {tasks.filter(t => t.done).length}/{tasks.length} done
-            </span>
-          </div>
-        )}
       </div>
+
+      {/* ─── Weekly tasks (separate section) ──────── */}
+      {weeklyTasks.length > 0 && (
+        <div className="bg-bg-card border border-border rounded-xl p-4">
+          <h3 className="text-sm font-medium text-text-secondary mb-3">📆 This week's goals</h3>
+          <div className="space-y-1.5">
+            {weeklyTasks.map(item => (
+              <div
+                key={item.id}
+                className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
+                  item.done ? 'opacity-50' : 'hover:bg-bg-hover'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={item.done}
+                  onChange={async () => { await toggleTask(item.id); await loadTasks(); }}
+                  aria-label={`Mark \"${item.text}\" as ${item.done ? 'not done' : 'done'}`}
+                  className="w-4 h-4 rounded border-border text-accent-green focus:ring-accent-green"
+                />
+                <span className={`flex-1 text-sm ${item.done ? 'text-text-dim line-through' : 'text-text-primary'}`}>
+                  {item.text}
+                </span>
+                <span className={`text-xs px-1.5 py-0.5 rounded ${
+                  item.done ? 'text-accent-green bg-accent-green/10' : 'text-text-muted bg-bg-hover'
+                }`}>
+                  {item.progress.done}/{item.progress.frequency}×
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Editor */}
       <div className="bg-bg-card border border-border rounded-xl overflow-hidden">

@@ -1078,17 +1078,27 @@ export interface JournalTaskItem {
   id: string;
   text: string;
   done: boolean;
-  /** For weekly tasks: progress info */
-  weekly?: { done: number; total: number; frequency: number };
+}
+
+export interface JournalWeeklyTask {
+  /** Task instance id for toggling */
+  id: string;
+  text: string;
+  done: boolean;
+  progress: { done: number; total: number; frequency: number };
+}
+
+export interface JournalTasks {
+  groups: JournalTaskGroup[];
+  weekly: JournalWeeklyTask[];
 }
 
 /**
  * Build grouped task data for the journal view.
- * - Daily presets: grouped by their slot (morning/midday/afternoon/night/anytime)
- * - Weekly tasks: deduplicated, shown once with remaining count
- * - Custom/extracted tasks: shown under 'anytime'
+ * Returns daily presets grouped by time-of-day AND weekly tasks separately.
+ * Weekly tasks are NOT mixed into the daily groups.
  */
-export async function getJournalTaskGroups(): Promise<JournalTaskGroup[]> {
+export async function getJournalTaskGroups(): Promise<JournalTasks> {
   await ensureDailyPresetInstances();
   await ensureWeeklyTaskInstances();
 
@@ -1118,44 +1128,18 @@ export async function getJournalTaskGroups(): Promise<JournalTaskGroup[]> {
       .equals(template.id)
       .filter(t => t.date === today)
       .first();
-    // Skip if no instance exists (ensureDailyPresetInstances should have created one)
     if (!instance) continue;
     slotMap.get(slot)!.push({
       id: instance.id,
       text: template.text,
       done: instance.done,
-      weekly: undefined,
     });
   }
 
-  // 2. Weekly tasks — deduplicated by template
-  const weeklyTemplates = (await getTemplatesByType('weekly'))
-    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  const anytimeItems = slotMap.get('anytime')!;
-
-  for (const template of weeklyTemplates) {
-    const frequency = template.weekFrequency ?? 1;
-    const weekTasks = await db.tasks
-      .where('templateId')
-      .equals(template.id)
-      .filter(t => t.weekKey === weekKey)
-      .toArray();
-    const done = weekTasks.filter(t => t.done).length;
-    const isComplete = done >= frequency;
-
-    const undoneInstance = weekTasks.find(t => !t.done) ?? weekTasks[0];
-
-    anytimeItems.push({
-      id: undoneInstance?.id ?? template.id,
-      text: template.text,
-      done: isComplete,
-      weekly: { done, total: weekTasks.length, frequency },
-    });
-  }
-
-  // 3. Custom/extracted tasks — under 'anytime'
+  // 2. Custom/extracted tasks — under 'anytime'
   const allTodayTasks = await getTodaysTasks();
   const customTasks = allTodayTasks.filter(t => !t.templateId && t.type !== 'todo');
+  const anytimeItems = slotMap.get('anytime')!;
   for (const task of customTasks) {
     anytimeItems.push({
       id: task.id,
@@ -1164,7 +1148,7 @@ export async function getJournalTaskGroups(): Promise<JournalTaskGroup[]> {
     });
   }
 
-  // Build result — only include non-empty groups, always show anytime
+  // Build daily groups — only include non-empty, always show anytime
   const groups: JournalTaskGroup[] = [];
   for (const slot of SLOT_ORDER) {
     const items = slotMap.get(slot)!;
@@ -1177,7 +1161,31 @@ export async function getJournalTaskGroups(): Promise<JournalTaskGroup[]> {
     });
   }
 
-  return groups;
+  // 3. Weekly tasks — separate list, deduplicated by template
+  const weeklyTemplates = (await getTemplatesByType('weekly'))
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const weekly: JournalWeeklyTask[] = [];
+
+  for (const template of weeklyTemplates) {
+    const frequency = template.weekFrequency ?? 1;
+    const weekTasks = await db.tasks
+      .where('templateId')
+      .equals(template.id)
+      .filter(t => t.weekKey === weekKey)
+      .toArray();
+    const done = weekTasks.filter(t => t.done).length;
+    const isComplete = done >= frequency;
+    const undoneInstance = weekTasks.find(t => !t.done) ?? weekTasks[0];
+
+    weekly.push({
+      id: undoneInstance?.id ?? template.id,
+      text: template.text,
+      done: isComplete,
+      progress: { done, total: weekTasks.length, frequency },
+    });
+  }
+
+  return { groups, weekly };
 }
 
 // ─── Task Template helpers ─────────────────────────
@@ -1430,8 +1438,9 @@ export async function getTemplatesWithStatus(): Promise<{
 
   const allTemplates = await getActiveTemplates();
 
-  // Daily presets
-  const presetTemplates = allTemplates.filter(t => t.type === 'preset');
+  // Daily presets (sorted by order)
+  const presetTemplates = allTemplates.filter(t => t.type === 'preset')
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   const presets = await Promise.all(
     presetTemplates.map(async (template) => {
       const instance = await db.tasks
