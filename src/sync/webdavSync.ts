@@ -10,7 +10,7 @@
 // concurrently will race — the last write wins. A proper solution requires
 // ETag/If-Match headers which not all WebDAV servers support.
 
-import { db, exportAllData } from '../db';
+import { db } from '../db';
 import { getSetting, setSetting } from '../db';
 
 // ─── Types ──────────────────────────────────────────
@@ -53,6 +53,12 @@ const SYNC_FILE = 'drift-data.json';
 // Sensitive keys excluded from export
 
 // ─── Helpers ────────────────────────────────────────
+
+/** Get the correct primary key for a record based on table name.
+ *  entryTags uses entryId as its Dexie primary key, not id. */
+export function getRecordKey(table: string, record: any): string {
+  return table === 'entryTags' ? record.entryId : record.id;
+}
 
 /** Build auth headers from config. Uses UTF-8-safe base64 encoding. */
 function authHeaders(config: SyncConfig): Record<string, string> {
@@ -230,13 +236,33 @@ export async function gcTombstones(): Promise<void> {
 
 // ─── Push ───────────────────────────────────────────
 
-/** Push all local data to WebDAV server. NOTE: unconditional PUT — last write wins. */
+/**
+ * Build a sync payload that includes tombstones.
+ * exportAllData() excludes tombstones and settings, so we build our own
+ * payload for sync to ensure deletions are propagated to other devices.
+ */
+async function buildSyncPayload(): Promise<string> {
+  return JSON.stringify({
+    entries: await db.entries.toArray(),
+    entryTags: await db.entryTags.toArray(),
+    sessions: await db.sessions.toArray(),
+    rewards: await db.rewards.toArray(),
+    moods: await db.moods.toArray(),
+    tasks: await db.tasks.toArray(),
+    taskTemplates: await db.taskTemplates.toArray(),
+    contextMemory: await db.contextMemory.toArray(),
+    tombstones: await getTombstones(),
+    exportedAt: new Date().toISOString(),
+  });
+}
+
+/** Push all local data (including tombstones) to WebDAV server. NOTE: unconditional PUT — last write wins. */
 export async function pushToServer(): Promise<void> {
   const config = await getSyncConfig();
   if (!config.enabled || !config.serverUrl) return;
 
   const baseUrl = parseWebDAVUrl(config.serverUrl);
-  const data = await exportAllData();
+  const data = await buildSyncPayload();
   const response = await fetch(baseUrl.toString() + SYNC_FILE, {
     method: 'PUT',
     headers: authHeaders(config),
@@ -253,6 +279,10 @@ export async function pushToServer(): Promise<void> {
  * Pull data from WebDAV server and merge into local DB.
  * 3-phase merge: detect conflicts → backup locals → merge.
  * Conflict: when remote record is newer OR same timestamp but different content.
+ *
+ * Local tombstones are merged with remote tombstones to prevent resurrection:
+ * if a record was locally deleted (has a local tombstone), it won't be re-imported
+ * from a remote that still has the old version.
  */
 export async function pullFromServerSafe(): Promise<{ conflicts: SyncConflict[]; backedUp: boolean }> {
   const config = await getSyncConfig();
@@ -286,7 +316,8 @@ export async function pullFromServerSafe(): Promise<{ conflicts: SyncConflict[];
 
     const localTable = db[tableName];
     for (const record of remoteRecords) {
-      const local = await localTable.get(record.id);
+      const key = getRecordKey(tableName, record);
+      const local = await localTable.get(key);
       if (local) {
         const localTime = getTimestamp(local);
         const remoteTime = getTimestamp(record);
@@ -294,9 +325,9 @@ export async function pullFromServerSafe(): Promise<{ conflicts: SyncConflict[];
           || (remoteTime === localTime && JSON.stringify(local) !== JSON.stringify(record));
 
         if (isConflict) {
-          conflicts.push({ table: tableName, id: record.id, localTimestamp: localTime, remoteTimestamp: remoteTime });
+          conflicts.push({ table: tableName, id: key, localTimestamp: localTime, remoteTimestamp: remoteTime });
           if (!conflictLocals[tableName]) conflictLocals[tableName] = {};
-          conflictLocals[tableName][record.id] = local;
+          conflictLocals[tableName][key] = local;
         }
       }
     }
@@ -326,25 +357,42 @@ export async function pullFromServerSafe(): Promise<{ conflicts: SyncConflict[];
   }
 
   // Phase 3: Merge (transactional)
+  const VALID_SYNC_TABLES = ['entries', 'entryTags', 'sessions', 'rewards', 'moods', 'tasks', 'taskTemplates', 'contextMemory'];
+
   await (db as any).transaction('rw', [db.entries, db.entryTags, db.sessions, db.rewards, db.moods, db.tasks, db.taskTemplates, db.contextMemory, db.settings], async () => {
-      // Apply remote tombstones (deletions) — only if tombstone is newer than local record
-      const VALID_SYNC_TABLES = ['entries', 'entryTags', 'sessions', 'rewards', 'moods', 'tasks', 'taskTemplates', 'contextMemory'];
+      // --- Merge local + remote tombstones to prevent resurrection ---
+      const localTombstones = await getTombstones();
       const remoteTombstones: Tombstone[] = (Array.isArray(remote.tombstones) ? remote.tombstones : [])
         .filter((ts: any) => ts && typeof ts.id === 'string' && typeof ts.table === 'string'
           && typeof ts.recordId === 'string' && typeof ts.deletedAt === 'string'
           && VALID_SYNC_TABLES.includes(ts.table));
+
+      // Build a merged tombstone map — newer wins
+      const tombstoneMap = new Map<string, Tombstone>();
+      for (const ts of localTombstones) {
+        tombstoneMap.set(ts.id, ts);
+      }
       for (const ts of remoteTombstones) {
+        const existing = tombstoneMap.get(ts.id);
+        if (!existing || ts.deletedAt > existing.deletedAt) {
+          tombstoneMap.set(ts.id, ts);
+        }
+      }
+      const allTombstones = Array.from(tombstoneMap.values());
+
+      // Build effective deleted set from merged tombstones (not just remote)
+      const deletedSet = new Set(allTombstones.map((ts: Tombstone) => `${ts.table}:${ts.recordId}`));
+
+      // Apply tombstones (deletions) — only if tombstone is newer than local record
+      for (const ts of allTombstones) {
         const localTable = (db as any)[ts.table];
         if (localTable) {
           const localRecord = await localTable.get(ts.recordId);
-          if (!localRecord || ts.deletedAt > getTimestamp(localRecord)) {
+          if (localRecord && ts.deletedAt > getTimestamp(localRecord)) {
             await localTable.delete(ts.recordId);
           }
         }
       }
-
-      // Build set of tombstone-deleted table:id combos
-      const deletedSet = new Set(remoteTombstones.map((ts: Tombstone) => `${ts.table}:${ts.recordId}`));
 
       // Merge records
       for (const tableName of tables) {
@@ -353,9 +401,10 @@ export async function pullFromServerSafe(): Promise<{ conflicts: SyncConflict[];
 
         const localTable = db[tableName];
         for (const record of remoteRecords) {
-          // Skip if this record was deleted by a tombstone
-          if (deletedSet.has(`${tableName}:${record.id}`)) continue;
-          const local = await localTable.get(record.id);
+          const key = getRecordKey(tableName, record);
+          // Skip if this record was deleted by a merged tombstone
+          if (deletedSet.has(`${tableName}:${key}`)) continue;
+          const local = await localTable.get(key);
           if (!local) {
             await localTable.put(record);
           } else {
@@ -371,17 +420,10 @@ export async function pullFromServerSafe(): Promise<{ conflicts: SyncConflict[];
           }
         }
       }
-      // Persist remote tombstones locally so they survive push and are propagated
-      if (remoteTombstones.length > 0) {
-        const localTombstones = await getTombstones();
-        const localMap = new Map(localTombstones.map(t => [t.id, t]));
-        for (const ts of remoteTombstones) {
-          const existing = localMap.get(ts.id);
-          if (!existing || ts.deletedAt > existing.deletedAt) {
-            localMap.set(ts.id, ts);
-          }
-        }
-        await saveTombstones(Array.from(localMap.values()));
+
+      // Persist merged tombstones locally so they survive push and are propagated
+      if (allTombstones.length > 0) {
+        await saveTombstones(allTombstones);
       }
     },
   );
@@ -391,7 +433,6 @@ export async function pullFromServerSafe(): Promise<{ conflicts: SyncConflict[];
     await setSetting('sync_last_conflicts', JSON.stringify(conflicts));
   }
 
-  // Apply local tombstones to remote on next push (export includes tombstones now)
   // Garbage-collect old tombstones
   await gcTombstones();
 

@@ -7,6 +7,7 @@ export interface JournalEntry {
   id: string;
   body: string;
   created: string;
+  updatedAt?: string;
   mood?: number;
   tags?: string[];
   aiSummary?: string;
@@ -36,6 +37,7 @@ export interface EntryTags {
 export interface ChatSession {
   id: string;
   started: string;
+  updatedAt?: string;
   ended?: string;
   entryId?: string;
   messages: { role: 'user' | 'assistant'; content: string; timestamp: string }[];
@@ -54,6 +56,7 @@ export interface MoodEntry {
   id: string;
   date: string;
   mood: number;
+  updatedAt?: string;
   entryId?: string;
 }
 
@@ -81,10 +84,7 @@ export interface Task {
   type?: 'daily' | 'todo';
   /** Optional due date for to-dos (YYYY-MM-DD) */
   dueDate?: string;
-  // NOTE for sync: Task has no `updatedAt` field. The sync layer (getTimestamp in
-  // webdavSync.ts) uses `createdAt` as a fallback, but mutations like toggleTask
-  // (done/doneAt changes) won't produce a newer timestamp. A proper fix requires
-  // adding an `updatedAt` field to Task and updating it on every mutation.
+  updatedAt?: string;
 }
 
 export interface TaskTemplate {
@@ -97,6 +97,7 @@ export interface TaskTemplate {
   /** How many completions needed per week (for weekly tasks) */
   weekFrequency?: number;
   createdAt: string;
+  updatedAt?: string;
   /** Can be deactivated without deleting */
   active: boolean;
 }
@@ -258,7 +259,7 @@ export async function finalizeDraft(
     wordCount,
     isDraft: false,
   };
-  await db.entries.update(draftId, { ...updates, updatedAt: new Date().toISOString() } as any);
+  await db.entries.update(draftId, { ...updates, updatedAt: new Date().toISOString() });
   const entry = await db.entries.get(draftId);
   if (!entry) throw new Error('Draft not found after finalization');
   return entry;
@@ -266,7 +267,7 @@ export async function finalizeDraft(
 
 export async function updateEntry(id: string, updates: Partial<JournalEntry>): Promise<void> {
   const old = await db.entries.get(id);
-  await db.entries.update(id, { ...updates, updatedAt: new Date().toISOString() } as any);
+  await db.entries.update(id, { ...updates, updatedAt: new Date().toISOString() });
 
   // Sync mood history if mood property was explicitly included in the update
   const hasMoodUpdate = Object.prototype.hasOwnProperty.call(updates, 'mood');
@@ -278,12 +279,13 @@ export async function updateEntry(id: string, updates: Partial<JournalEntry>): P
       // Mood changed — update or create mood record
       const existing = await db.moods.where('entryId').equals(id).first();
       if (existing) {
-        await db.moods.update(existing.id, { mood: updates.mood });
+        await db.moods.update(existing.id, { mood: updates.mood, updatedAt: new Date().toISOString() });
       } else {
         await db.moods.add({
           id: uuid(),
           date: localDateKey(new Date(old.created)),
           mood: updates.mood,
+          updatedAt: new Date().toISOString(),
           entryId: id,
         });
       }
@@ -294,6 +296,7 @@ export async function updateEntry(id: string, updates: Partial<JournalEntry>): P
 /**
  * Delete an entry and all related data (tags, moods, sessions) in one transaction.
  * Also cancels any pending background tagging for this entry.
+ * Tombstones are written inside the same transaction for atomicity.
  */
 export async function deleteEntry(id: string): Promise<void> {
   // Record tombstones before deletion for sync propagation.
@@ -307,20 +310,26 @@ export async function deleteEntry(id: string): Promise<void> {
   ]);
   const deletions: { table: string; recordId: string }[] = [
     { table: 'entries', recordId: id },
-    ...tags.map(t => ({ table: 'entryTags', recordId: t.id })),
+    ...tags.map(t => ({ table: 'entryTags', recordId: t.entryId })),
     ...moods.map(m => ({ table: 'moods', recordId: m.id })),
     ...sessions.map(s => ({ table: 'sessions', recordId: s.id })),
     ...tasks.map(t => ({ table: 'tasks', recordId: t.id })),
   ];
-  await recordDeletions(deletions);
 
-  await db.transaction('rw', [db.entries, db.entryTags, db.moods, db.sessions, db.tasks], async () => {
-    await db.entries.delete(id);
-    await db.entryTags.where('entryId').equals(id).delete();
-    await db.moods.where('entryId').equals(id).delete();
-    await db.sessions.where('entryId').equals(id).delete();
-    await db.tasks.where('entryId').equals(id).delete();
-  });
+  // Atomic: tombstones + record deletion in the same transaction.
+  // Including db.settings ensures recordDeletions() operates within this tx.
+  await db.transaction(
+    'rw',
+    [db.entries, db.entryTags, db.moods, db.sessions, db.tasks, db.settings],
+    async () => {
+      await recordDeletions(deletions);
+      await db.entries.delete(id);
+      await db.entryTags.where('entryId').equals(id).delete();
+      await db.moods.where('entryId').equals(id).delete();
+      await db.sessions.where('entryId').equals(id).delete();
+      await db.tasks.where('entryId').equals(id).delete();
+    },
+  );
 }
 
 /** Get non-draft entries only, ordered newest first. */
@@ -388,12 +397,13 @@ export async function addMessageToSession(
 ): Promise<void> {
   await db.sessions.where('id').equals(sessionId).modify(session => {
     session.messages.push({ role, content, timestamp: new Date().toISOString() });
+    session.updatedAt = new Date().toISOString();
   });
   triggerSync();
 }
 
 export async function endSession(sessionId: string): Promise<void> {
-  await db.sessions.update(sessionId, { ended: new Date().toISOString() });
+  await db.sessions.update(sessionId, { ended: new Date().toISOString(), updatedAt: new Date().toISOString() });
   triggerSync();
 }
 
@@ -401,10 +411,12 @@ export async function endSession(sessionId: string): Promise<void> {
 
 export async function logMood(mood: number, entryId?: string): Promise<MoodEntry> {
   const today = localDateKey();
+  const now = new Date().toISOString();
   const entry: MoodEntry = {
     id: uuid(),
     date: today,
     mood,
+    updatedAt: now,
     entryId,
   };
   await db.moods.add(entry);
@@ -661,12 +673,14 @@ export async function toggleTask(id: string): Promise<void> {
   await db.tasks.where('id').equals(id).modify(task => {
     task.done = !task.done;
     task.doneAt = task.done ? new Date().toISOString() : undefined;
-    (task as any).updatedAt = new Date().toISOString();
+    task.updatedAt = new Date().toISOString();
   });
 }
 
-/** Delete a task. */
+/** Delete a task. Records a tombstone for sync. */
 export async function deleteTask(id: string): Promise<void> {
+  const { recordDeletion } = await import('../sync/webdavSync');
+  await recordDeletion('tasks', id);
   await db.tasks.delete(id);
 }
 
@@ -762,22 +776,30 @@ export async function getTemplatesByType(type: TaskTemplate['type']): Promise<Ta
 
 /** Update a template. */
 export async function updateTaskTemplate(id: string, updates: Partial<TaskTemplate>): Promise<void> {
-  await db.taskTemplates.update(id, updates);
+  await db.taskTemplates.update(id, { ...updates, updatedAt: new Date().toISOString() });
 }
 
 /** Deactivate (soft-delete) a template. */
 export async function deactivateTemplate(id: string): Promise<void> {
-  await db.taskTemplates.update(id, { active: false });
+  await db.taskTemplates.update(id, { active: false, updatedAt: new Date().toISOString() });
 }
 
 /** Move a task template to a different preset slot. */
 export async function moveTemplateToPreset(id: string, newPreset: TaskTemplate['preset']): Promise<void> {
-  await db.taskTemplates.update(id, { preset: newPreset });
+  await db.taskTemplates.update(id, { preset: newPreset, updatedAt: new Date().toISOString() });
 }
 
-/** Delete a template and all its task instances. */
+/** Delete a template and all its task instances. Records tombstones for sync. */
 export async function deleteTaskTemplate(id: string): Promise<void> {
-  await db.transaction('rw', db.taskTemplates, db.tasks, async () => {
+  const { recordDeletions } = await import('../sync/webdavSync');
+  // Collect all task IDs that will be deleted so we can tombstone them
+  const tasksToDelete = await db.tasks.where('templateId').equals(id).toArray();
+  const deletions: { table: string; recordId: string }[] = [
+    { table: 'taskTemplates', recordId: id },
+    ...tasksToDelete.map(t => ({ table: 'tasks', recordId: t.id })),
+  ];
+  await db.transaction('rw', db.taskTemplates, db.tasks, db.settings, async () => {
+    await recordDeletions(deletions);
     await db.taskTemplates.delete(id);
     await db.tasks.where('templateId').equals(id).delete();
   });
@@ -1069,17 +1091,22 @@ export async function getLastEntriesForContext(count: number = 10): Promise<Jour
 // sync trigger — debounced to avoid excessive sync calls
 // No-op if WebDAV sync is not configured (local-first)
 let syncTimeout: ReturnType<typeof setTimeout> | null = null;
+let syncMutex = false;
 
 export function triggerSync(): void {
   if (syncTimeout) clearTimeout(syncTimeout);
   syncTimeout = setTimeout(async () => {
+    if (syncMutex) return; // skip if a sync is already in progress
+    syncMutex = true;
     try {
-      const { isSyncEnabled, pushToServer } = await import('../sync/webdavSync');
+      const { isSyncEnabled, performSync } = await import('../sync/webdavSync');
       if (await isSyncEnabled()) {
-        await pushToServer();
+        await performSync();
       }
     } catch {
       // Silent — sync module may not be configured, that's fine
+    } finally {
+      syncMutex = false;
     }
   }, 2000); // 2s debounce
 }

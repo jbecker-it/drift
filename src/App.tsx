@@ -112,54 +112,57 @@ export default function App() {
   const [initError, setInitError] = useState(false);
 
   useEffect(() => {
-    let cancelled = false;
-    const timeout = setTimeout(() => {
-      if (!cancelled) {
-        console.warn('Drift: DB init timed out — showing error state');
-        setInitError(true);
-        setReady(true);
-      }
-    }, 15000); // 15s — longer than the 10s sync timeout
+    let disposed = false;
+    let settled = false;
 
-    getApiKey().then(async key => {
-      if (cancelled) return;
-      setInitError(false); // Clear any prior timeout error
-
-      // #36: Use pullFromServerSafe directly to capture conflict info.
-      // #35: Complete the initial sync pull before marking ready, with a timeout.
-      try {
-        if (await isSyncEnabled()) {
-          const syncTimeout = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('Sync pull timed out')), 10000)
-          );
-          const syncResult = await Promise.race([
-            pullFromServerSafe(),
-            syncTimeout,
-          ]);
-          // #36: Log any conflicts discovered during initial pull.
-          if (syncResult.conflicts.length > 0) {
-            console.warn('Drift: initial sync found conflicts', syncResult.conflicts);
-          }
-        }
-      } catch (err) {
-        console.warn('Drift: initial sync pull failed', err);
-      }
-
-      if (cancelled) return;
-      clearTimeout(timeout);
-      setHasApiKey(!!key);
-      setReady(true);
-      // Initialize notifications after app is ready
-      initNotifications().catch(() => {});
-    }).catch(err => {
-      console.error('Drift: failed to load API key', err);
-      clearTimeout(timeout);
-      if (cancelled) return;
+    const failInit = () => {
+      if (disposed || settled) return;
+      settled = true;
       setInitError(true);
       setReady(true);
-    });
+    };
 
-    return () => { cancelled = true; clearTimeout(timeout); };
+    const timeout = setTimeout(failInit, 15000); // 15s — longer than the 10s sync timeout
+
+    (async () => {
+      try {
+        const key = await getApiKey();
+        if (disposed || settled) return;
+
+        // #36: Use pullFromServerSafe directly to capture conflict info.
+        // #35: Complete the initial sync pull before marking ready, with a timeout.
+        try {
+          if (await isSyncEnabled()) {
+            const syncTimeout = new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('Sync pull timed out')), 10000)
+            );
+            const syncResult = await Promise.race([
+              pullFromServerSafe(),
+              syncTimeout,
+            ]);
+            // #36: Log any conflicts discovered during initial pull.
+            if (syncResult.conflicts.length > 0) {
+              console.warn('Drift: initial sync found conflicts', syncResult.conflicts);
+            }
+          }
+        } catch (err) {
+          console.warn('Drift: initial sync pull failed', err);
+        }
+
+        if (disposed || settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        setHasApiKey(!!key);
+        setReady(true);
+        // Initialize notifications after app is ready
+        initNotifications().catch(() => {});
+      } catch (err) {
+        console.error('Drift: failed to load API key', err);
+        failInit();
+      }
+    })();
+
+    return () => { disposed = true; clearTimeout(timeout); };
   }, []);
 
   // #37: Re-read the API key after onboarding completes to ensure consistency.
