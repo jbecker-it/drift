@@ -658,16 +658,6 @@ export async function clearAllData(): Promise<void> {
 /** Tables we expect in the old 'drift' database. */
 const OLD_DB_TABLES = ['entries', 'entryTags', 'sessions', 'rewards', 'moods', 'settings'];
 
-/** Primary key name for each table in the old schema. */
-const OLD_DB_PRIMARY_KEY: Record<string, string> = {
-  entries: 'id',
-  entryTags: 'id',   // old schema used 'id', not 'entryId'
-  sessions: 'id',
-  rewards: 'id',
-  moods: 'id',
-  settings: 'key',
-};
-
 /**
  * Read all records from a raw IndexedDB object store.
  * Returns a promise that resolves with an array of structured-clone'd records.
@@ -676,7 +666,7 @@ function readRawStore(
   db: IDBDatabase,
   storeName: string,
 ): Promise<any[]> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     try {
       if (!db.objectStoreNames.contains(storeName)) {
         return resolve([]);
@@ -711,13 +701,13 @@ function openOldDriftDB(): Promise<IDBDatabase | null> {
         resolve(idb);
       };
       req.onerror = () => resolve(null);
-      req.onabort = () => resolve(null);
+      req.addEventListener('abort', () => resolve(null));
       req.onblocked = () => resolve(null);
       // If the DB doesn't exist yet, onupgradeneeded fires — just close it.
       req.onupgradeneeded = (event) => {
         // New DB — nothing to read. Abort the upgrade to prevent creating
         // a phantom empty 'drift' database that would persist forever.
-        event.target?.transaction?.abort();
+        (event.target as IDBOpenDBRequest)?.transaction?.abort();
       };
     } catch {
       resolve(null);
@@ -905,7 +895,6 @@ export async function importFromJson(jsonString: string): Promise<{
         // Persist tombstones locally so they survive push
         if (tombstones.length > 0) {
           const { getTombstones } = await import('../sync/webdavSync');
-          const { recordDeletions } = await import('../sync/webdavSync');
           // Merge: local tombstones + imported tombstones (newer wins)
           const localTombstones = await getTombstones();
           const tombstoneMap = new Map<string, any>();

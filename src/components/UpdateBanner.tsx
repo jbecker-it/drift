@@ -21,11 +21,7 @@ export default function UpdateBanner() {
   const [updating, setUpdating] = useState(false);
 
   // PWA service worker registration + update detection
-  const {
-    offlineReady: [offlineReady],
-    needRefresh: [needRefresh],
-    updateServiceWorker,
-  } = useRegisterSW({
+  const { updateServiceWorker } = useRegisterSW({
     onOfflineReady() {
       console.log('Drift: offline ready');
     },

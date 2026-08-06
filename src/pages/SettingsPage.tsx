@@ -580,6 +580,12 @@ export default function SettingsPage() {
           </p>
         )}
 
+        {notifSupported && (
+          <p className="text-xs text-text-dim bg-bg-hover/60 border border-border rounded-lg px-3 py-2 leading-relaxed">
+            ⚠️ Reminders are local to this device and <span className="text-text-secondary font-medium">only fire while Drift is open</span> in your browser. They don't run in the background when the app is closed or the tab is suspended.
+          </p>
+        )}
+
         {notifSettings.enabled && (
           <div className="space-y-3 pt-2 border-t border-border">
             <div className="flex items-center gap-3">

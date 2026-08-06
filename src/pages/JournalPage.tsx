@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   saveEntry, saveDraft, finalizeDraft, getRecentEntries, logMood, updateEntry, deleteEntry, db,
   awardReward,
-  getTodaysTasks, addTask, toggleTask, deleteTask, getTodayTasksSummary,
-  getEntrySummaries, extractTasksFromTags, getTaskNudgeSummary, type Task,
+  addTask, toggleTask, deleteTask, getTodayTasksSummary,
+  getEntrySummaries, extractTasksFromTags, getTaskNudgeSummary,
   getJournalTaskGroups, type JournalTaskGroup, type JournalWeeklyTask,
   type JournalEntry,
 } from '../db';

@@ -676,6 +676,9 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
               <p className="text-text-secondary mt-2">
                 Get gentle reminders to journal and check your tasks.
               </p>
+              <p className="text-xs text-text-dim mt-3 bg-bg-card border border-border rounded-lg px-3 py-2 leading-relaxed">
+                ⚠️ Reminders only fire while Drift is open in your browser — not in the background when the app is closed.
+              </p>
             </div>
 
             <div className="space-y-4">
