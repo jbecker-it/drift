@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   addTask, toggleTask, deleteTask, getTodaysTasks,
-  addTodo, getOpenTodos, isOverdue, isDueToday, isDueThisWeek, moveTemplateToPreset,
+  addTodo, getOpenTodos, isOverdue, isDueToday, isDueThisWeek,
   reorderTemplate,
-  createTaskTemplate, deleteTaskTemplate, getTemplatesWithStatus,
+  createTaskTemplate, deleteTaskTemplate, getTemplatesWithStatus, setTemplateSlots,
+  getTemplateSlots, orderInSlot, DAY_SLOTS,
   ensureDailyPresetInstances, ensureWeeklyTaskInstances, getWeeklyTaskInstances,
-  type Task, type TaskTemplate,
+  type Task, type TaskTemplate, type DaySlot, type JournalTaskSlot,
 } from '../db';
 
 type Tab = 'daily' | 'weekly' | 'todos' | 'custom';
@@ -17,12 +18,12 @@ const PRESET_ICONS: Record<string, string> = {
   night: '🌙',
 };
 
-const PRESET_ORDER: TaskTemplate['preset'][] = ['morning', 'midday', 'afternoon', 'night'];
+const PRESET_ORDER: DaySlot[] = ['morning', 'midday', 'afternoon', 'night'];
 
 export default function TasksPage() {
   const [tab, setTab] = useState<Tab>('daily');
   const [customTasks, setCustomTasks] = useState<Task[]>([]);
-  const [presetData, setPresetData] = useState<{ template: TaskTemplate; instance?: Task }[]>([]);
+  const [presetData, setPresetData] = useState<{ template: TaskTemplate; instances: Partial<Record<JournalTaskSlot, Task>> }[]>([]);
   const [weeklyData, setWeeklyData] = useState<{ template: TaskTemplate; done: number; total: number; frequency: number }[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +33,7 @@ export default function TasksPage() {
   const [showAddPreset, setShowAddPreset] = useState(false);
   const [showAddWeekly, setShowAddWeekly] = useState(false);
   const [newPresetText, setNewPresetText] = useState('');
-  const [newPresetSlot, setNewPresetSlot] = useState<TaskTemplate['preset']>('morning');
+  const [newPresetSlots, setNewPresetSlots] = useState<DaySlot[]>(['morning']);
   const [newWeeklyText, setNewWeeklyText] = useState('');
   const [newWeeklyFreq, setNewWeeklyFreq] = useState(2);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -132,9 +133,10 @@ export default function TasksPage() {
 
   const handleAddPreset = async () => {
     const text = newPresetText.trim();
-    if (!text) return;
-    await createTaskTemplate(text, 'preset', newPresetSlot);
+    if (!text || newPresetSlots.length === 0) return;
+    await createTaskTemplate(text, 'preset', undefined, undefined, newPresetSlots);
     setNewPresetText('');
+    setNewPresetSlots(['morning']);
     setShowAddPreset(false);
     await loadAll();
   };
@@ -150,14 +152,21 @@ export default function TasksPage() {
     await loadAll();
   };
 
-  const handleMovePreset = async (templateId: string, newPreset: TaskTemplate['preset']) => {
-    await moveTemplateToPreset(templateId, newPreset);
+  const handleToggleSlot = async (templateId: string, slot: DaySlot) => {
+    const tpl = presetData.find(p => p.template.id === templateId)?.template;
+    if (!tpl) return;
+    const current = getTemplateSlots(tpl).filter((s): s is DaySlot => DAY_SLOTS.includes(s as DaySlot));
+    const isOn = current.includes(slot);
+    // Prevent removing the final slot — an active preset needs at least one.
+    if (isOn && current.length === 1) return;
+    const next = isOn ? current.filter(s => s !== slot) : [...current, slot];
+    await setTemplateSlots(templateId, next);
     setOpenMoveMenu(null);
     await loadAll();
   };
 
-  const handleReorder = async (templateId: string, direction: 'up' | 'down') => {
-    await reorderTemplate(templateId, direction);
+  const handleReorder = async (templateId: string, slot: DaySlot, direction: 'up' | 'down') => {
+    await reorderTemplate(templateId, slot, direction);
     await loadAll();
   };
 
@@ -276,7 +285,12 @@ export default function TasksPage() {
         <div role="tabpanel" id="daily-panel" aria-label="Daily preset tasks" className="space-y-4">
           {/* Preset sections by time of day */}
           {PRESET_ORDER.map(slot => {
-            const items = presetData.filter(p => p.template.preset === slot);
+            const items = presetData
+              .filter(p => getTemplateSlots(p.template).includes(slot))
+              .map(p => ({ template: p.template, instance: p.instances[slot] }))
+              .sort((a, b) =>
+                orderInSlot(a.template, slot) - orderInSlot(b.template, slot)
+                || a.template.createdAt.localeCompare(b.template.createdAt));
             if (items.length === 0 && !showAddPreset) return null;
             const done = items.filter(p => p.instance?.done).length;
             return (
@@ -323,13 +337,13 @@ export default function TasksPage() {
                       {/* Reorder buttons */}
                       <div className="flex flex-col shrink-0">
                         <button
-                          onClick={() => handleReorder(template.id, 'up')}
+                          onClick={() => handleReorder(template.id, slot, 'up')}
                           disabled={idx === 0}
                           aria-label={`Move "${template.text}" up`}
                           className="text-text-dim hover:text-text-secondary transition-colors text-xs leading-none px-1 py-0.5 disabled:opacity-20 disabled:cursor-default"
                         >▲</button>
                         <button
-                          onClick={() => handleReorder(template.id, 'down')}
+                          onClick={() => handleReorder(template.id, slot, 'down')}
                           disabled={idx === items.length - 1}
                           aria-label={`Move "${template.text}" down`}
                           className="text-text-dim hover:text-text-secondary transition-colors text-xs leading-none px-1 py-0.5 disabled:opacity-20 disabled:cursor-default"
@@ -346,20 +360,30 @@ export default function TasksPage() {
                           className="text-text-dim hover:text-text-secondary transition-colors px-1"
                         >↗</button>
                         {openMoveMenu === template.id && (
-                          <div role="menu" className="absolute right-0 top-full mt-1 z-10
-                                          bg-bg-card border border-border rounded-xl shadow-lg py-1 min-w-[120px]">
-                            {PRESET_ORDER.filter(s => s !== template.preset).map(s => (
-                              <button
-                                key={s}
-                                role="menuitem"
-                                onClick={() => handleMovePreset(template.id, s)}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-text-secondary
-                                           hover:bg-bg-hover hover:text-text-primary transition-colors"
-                              >
-                                <span aria-hidden="true">{PRESET_ICONS[s || '']}</span>
-                                <span className="capitalize">{s}</span>
-                              </button>
-                            ))}
+                          <div role="menu" aria-label="Edit time-of-day slots" className="absolute right-0 top-full mt-1 z-10
+                                          bg-bg-card border border-border rounded-xl shadow-lg py-1 min-w-[150px]">
+                            {DAY_SLOTS.map(s => {
+                              const currentDaySlots = getTemplateSlots(template)
+                                .filter((x): x is DaySlot => DAY_SLOTS.includes(x as DaySlot));
+                              const on = currentDaySlots.includes(s);
+                              const isLastOn = on && currentDaySlots.length === 1;
+                              return (
+                                <button
+                                  key={s}
+                                  role="menuitemcheckbox"
+                                  aria-checked={on}
+                                  disabled={isLastOn}
+                                  onClick={() => handleToggleSlot(template.id, s)}
+                                  className={`w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                                    on ? 'text-accent-green' : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+                                  }`}
+                                >
+                                  <span aria-hidden="true">{PRESET_ICONS[s || '']}</span>
+                                  <span className="capitalize">{s}</span>
+                                  {on && <span className="ml-auto text-xs" aria-hidden="true">✓</span>}
+                                </button>
+                              );
+                            })}
                           </div>
                         )}
                       </div>
@@ -403,32 +427,38 @@ export default function TasksPage() {
                 aria-label="Preset task name"
                 className="w-full px-4 py-3 bg-bg-input border border-border rounded-xl text-text-primary placeholder:text-text-dim focus:border-accent-green focus:ring-1 focus:ring-accent-green transition-colors"
               />
+              <p className="text-xs text-text-muted">Applies at 1+ parts of the day — one task, checked off per segment</p>
               <div role="group" aria-label="Time of day" className="flex gap-2">
-                {PRESET_ORDER.map(slot => (
-                  <button
-                    key={slot}
-                    role="radio"
-                    aria-checked={newPresetSlot === slot}
-                    onClick={() => setNewPresetSlot(slot)}
-                    className={`flex-1 flex items-center justify-center gap-1 px-2 py-2 rounded-lg text-xs font-medium transition-all ${
-                      newPresetSlot === slot
-                        ? 'bg-accent-green/15 text-accent-green border border-accent-green/30'
-                        : 'bg-bg-hover text-text-dim border border-border hover:text-text-secondary'
-                    }`}
-                  >
-                    <span aria-hidden="true">{slot ? PRESET_ICONS[slot] : ''}</span>
-                    <span className="capitalize">{slot}</span>
-                  </button>
-                ))}
+                {DAY_SLOTS.map(slot => {
+                  const on = newPresetSlots.includes(slot);
+                  return (
+                    <button
+                      key={slot}
+                      role="checkbox"
+                      aria-checked={on}
+                      onClick={() => setNewPresetSlots(prev =>
+                        on ? prev.filter(s => s !== slot) : [...prev, slot],
+                      )}
+                      className={`flex-1 flex items-center justify-center gap-1 px-2 py-2 rounded-lg text-xs font-medium transition-all ${
+                        on
+                          ? 'bg-accent-green/15 text-accent-green border border-accent-green/30'
+                          : 'bg-bg-hover text-text-dim border border-border hover:text-text-secondary'
+                      }`}
+                    >
+                      <span aria-hidden="true">{slot ? PRESET_ICONS[slot] : ''}</span>
+                      <span className="capitalize">{slot}</span>
+                    </button>
+                  );
+                })}
               </div>
               <div className="flex gap-2">
                 <button
                   onClick={handleAddPreset}
-                  disabled={!newPresetText.trim()}
+                  disabled={!newPresetText.trim() || newPresetSlots.length === 0}
                   className="flex-1 px-4 py-2.5 bg-accent-green text-bg-primary font-medium rounded-xl hover:bg-accent-green/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >Add Preset</button>
                 <button
-                  onClick={() => { setShowAddPreset(false); setNewPresetText(''); }}
+                  onClick={() => { setShowAddPreset(false); setNewPresetText(''); setNewPresetSlots(['morning']); }}
                   className="px-4 py-2.5 border border-border rounded-xl text-text-dim hover:bg-bg-hover transition-colors"
                 >Cancel</button>
               </div>

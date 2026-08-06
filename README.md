@@ -12,7 +12,7 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 - 🧠 **Context Memory** — Drift builds a rolling profile of you (patterns, key facts, open loops, recent wins, mood trend) that makes AI reflections feel personal instead of generic. Refreshed every ~5 entries by the background model.
 - 🤖 **AI Reflections** — Get personalized reflections powered by your context memory, today's tasks, recent entry summaries, and current entry — all in one prompt.
 - ✅ **Daily Tasks** — Add tasks for today, tick them off while journaling. Tasks are also auto-extracted from your entries by the background model.
-- 📋 **Task Presets** — Create recurring daily tasks for morning, midday, afternoon, and night. Tasks auto-appear each day in their time slot. Move tasks between segments with one click.
+- 📋 **Task Presets** — Create recurring daily tasks for morning, midday, afternoon, and night. **One task can span multiple time slots** (e.g. "drink water" under Morning 🌅 + Afternoon 🌤️ + Night 🌙), each checked off independently — no more duplicate entries. Toggle a task's segments via the slot menu and reorder each segment independently.
 - 📆 **Weekly Tasks** — Set tasks that repeat weekly with configurable frequency (e.g., "exercise 3×/week"). Track completions across the running week with progress dots.
 - 📝 **To-Dos** — Persistent tasks that don't expire daily. Set optional due dates with overdue/today/this-week visual urgency cues.
 - 🔔 **Smart Notifications** — Configurable reminders to journal and check tasks. **Per-part-of-day task reminders** fire at the end of morning, midday, afternoon, and night slots. Evening reminders only fire if you haven't journaled. General task reminders cover custom tasks and to-dos.
@@ -52,7 +52,7 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 **Pre-built releases** — no Node.js required:
 [GitHub Releases](https://github.com/jbecker-it/drift/releases)
 
-1. Download `drift-v0.5.4.zip` from the latest release
+1. Download `drift-v0.6.0.zip` from the latest release
 2. Unzip it
 3. Serve the `dist/` folder (e.g. `npx serve dist`, or deploy to any static host)
 
@@ -175,6 +175,30 @@ This project is licensed under the **MIT License**.
 ---
 
 ## 📋 Changelog
+
+### v0.6.0 — Multi-Slot Daily Presets
+
+**📋 One Task, Many Points in the Day**
+
+- A daily preset task can now apply across **multiple** time-of-day segments (Morning 🌅, Midday ☀️, Afternoon 🌤️, Night 🌙) with a single entry
+- Each segment gets its own independent checkbox — e.g. track "drink water" 🌅 + ☀️ + 🌙 with one task instead of three duplicate rows
+- New-preset form has a **multi-select** emoji picker: toggle any combination of segments
+- The slot menu (↗) edits a task's segments after creation; the last remaining segment can't be removed
+- **Independent per-segment ordering** — reorder a task in the Morning list without disturbing the Night list
+- Legacy single-slot tasks keep working unchanged: no migration needed, no duplicate instances
+
+**✅ Data Integrity**
+
+- `ensureDailyPresetInstances` is now one atomic transaction — concurrent loads (tasks page, journal, notifications) can never create duplicate instances
+- Slot edits are transactional: legacy instances are materialized to their original slot and removed-slot instances are cleaned up (no reinterpretation bugs)
+- Normalized slot lists (dedupe + day-slot only), empty-slot rejection, per-slot order seeding
+
+**🔍 Quality**
+
+- Code reviewed with **GPT-5.6-Terra** (3 rounds — every finding fixed and re-validated to sign-off)
+- Added `npm test`: 10 regression tests over the real data layer via `fake-indexeddb`
+
+---
 
 ### v0.5.4 — Per-Slot Notifications, WebDAV Sync & Extended Onboarding
 

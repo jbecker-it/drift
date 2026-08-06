@@ -1,11 +1,12 @@
 {
   "name": "drift",
   "private": true,
-  "version": "0.5.9",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test": "tsx --test scripts/slot-test.test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },
@@ -21,9 +22,11 @@
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^6.0.3",
     "dexie": "^4.4.4",
+    "fake-indexeddb": "^6.2.5",
     "oxlint": "^1.71.0",
     "react-router-dom": "^7.18.1",
     "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.9",
     "typescript": "~6.0.2",
     "uuid": "^14.0.1",
     "vite": "^8.1.1",

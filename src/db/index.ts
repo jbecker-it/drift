@@ -84,6 +84,12 @@ export interface Task {
   type?: 'daily' | 'todo';
   /** Optional due date for to-dos (YYYY-MM-DD) */
   dueDate?: string;
+  /**
+   * Time-of-day slot this specific instance belongs to.
+   * Present only on multi-slot daily preset instances (one instance per slot).
+   * Legacy single-slot instances omit this and inherit their template's slot.
+   */
+  slot?: JournalTaskSlot;
   updatedAt?: string;
 }
 
@@ -98,6 +104,17 @@ export interface TaskTemplate {
   weekFrequency?: number;
   /** Sort order within the preset slot */
   order: number;
+  /**
+   * Time-of-day slots this daily task applies to (multi-slot support).
+   * One template can appear under several slots, each checked off independently.
+   * Falls back to `preset` for legacy single-slot templates.
+   */
+  slots?: JournalTaskSlot[];
+  /**
+   * Independent display order per time-of-day slot. When a template sits in more
+   * than one slot, each slot keeps its own ordering. Falls back to `order`.
+   */
+  slotOrders?: Partial<Record<JournalTaskSlot, number>>;
   createdAt: string;
   updatedAt?: string;
   /** Can be deactivated without deleting */
@@ -1021,15 +1038,22 @@ export async function getTodaysTasksBySlot(
   const today = localDateKey();
   const templates = await db.taskTemplates
     .where('type').equals('preset')
-    .filter(t => t.preset === slot && t.active)
+    .filter(t => t.active && getTemplateSlots(t).includes(slot))
     .toArray();
 
   const templateIds = templates.map(t => t.id);
   if (templateIds.length === 0) return [];
+  const templateById = new Map(templates.map(t => [t.id, t]));
 
   return db.tasks
     .where('date').equals(today)
-    .filter(t => !!t.templateId && templateIds.includes(t.templateId) && !t.done)
+    .filter(t => {
+      if (!t.templateId || !templateIds.includes(t.templateId) || t.done) return false;
+      // Slotted instance → must match the requested slot; legacy → first slot.
+      if (t.slot) return t.slot === slot;
+      const first = getTemplateSlots(templateById.get(t.templateId)!)[0];
+      return first === slot;
+    })
     .toArray();
 }
 
@@ -1054,6 +1078,36 @@ export async function getTodayTasksSummary(): Promise<string> {
 // ─── Journal Task Groups ────────────────────────────
 
 export type JournalTaskSlot = 'morning' | 'midday' | 'afternoon' | 'night' | 'anytime';
+
+/** The four time-of-day segments shown in the daily tab. */
+export type DaySlot = Exclude<JournalTaskSlot, 'anytime'>;
+
+/** The four time-of-day segments shown in the daily tab. */
+export const DAY_SLOTS: DaySlot[] = ['morning', 'midday', 'afternoon', 'night'];
+
+/**
+ * Resolve which time-of-day slots a preset template applies to.
+ * Multi-slot templates use `slots`; legacy single-slot ones fall back to `preset`.
+ */
+export function getTemplateSlots(template: Pick<TaskTemplate, 'slots' | 'preset'>): JournalTaskSlot[] {
+  if (template.slots && template.slots.length > 0) return [...new Set(template.slots)];
+  return template.preset ? [template.preset] : [];
+}
+
+/**
+ * Display order of a template within a specific slot.
+ * Multi-slot templates keep an independent order per slot (`slotOrders`);
+ * legacy single-slot templates fall back to the scalar `order` field.
+ */
+export function orderInSlot(template: Pick<TaskTemplate, 'slotOrders' | 'order'>, slot: JournalTaskSlot): number {
+  return template.slotOrders?.[slot] ?? template.order ?? 0;
+}
+
+/** Normalize caller-supplied day slots: dedupe + drop non-day values. */
+export function normalizeDaySlots(slots: DaySlot[] | undefined): DaySlot[] {
+  if (!slots) return [];
+  return [...new Set(slots.filter((s): s is DaySlot => DAY_SLOTS.includes(s)))];
+}
 
 export interface JournalTaskGroup {
   slot: JournalTaskSlot;
@@ -1104,25 +1158,39 @@ export async function getJournalTaskGroups(): Promise<JournalTasks> {
 
   const SLOT_ORDER: JournalTaskSlot[] = ['morning', 'midday', 'afternoon', 'night', 'anytime'];
 
-  // 1. Daily presets — one instance per template (sorted by order)
-  const presetTemplates = (await getTemplatesByType('preset'))
-    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  // 1. Daily presets — grouped by slot, ordered per-slot
+  const presetTemplates = await getTemplatesByType('preset');
   const slotMap = new Map<JournalTaskSlot, JournalTaskItem[]>();
   for (const slot of SLOT_ORDER) slotMap.set(slot, []);
 
+  // Preload today's instances per template so each slot list sorts by its own order.
+  const instanceByTemplate = new Map<string, Record<string, Task>>();
   for (const template of presetTemplates) {
-    const slot = template.preset || 'anytime';
-    const instance = await db.tasks
+    const slots = getTemplateSlots(template);
+    const dayInstances = await db.tasks
       .where('templateId')
       .equals(template.id)
       .filter(t => t.date === today)
-      .first();
-    if (!instance) continue;
-    slotMap.get(slot)!.push({
-      id: instance.id,
-      text: template.text,
-      done: instance.done,
-    });
+      .toArray();
+    const bySlot: Record<string, Task> = {};
+    for (const t of dayInstances) {
+      const s = t.slot ?? slots[0];
+      if (s && slots.includes(s)) bySlot[s] = t;
+    }
+    instanceByTemplate.set(template.id, bySlot);
+  }
+
+  for (const slot of SLOT_ORDER) {
+    const slotTemplates = presetTemplates
+      .filter(t => getTemplateSlots(t).includes(slot))
+      .sort((a, b) => orderInSlot(a, slot) - orderInSlot(b, slot) || a.createdAt.localeCompare(b.createdAt));
+    const items: JournalTaskItem[] = [];
+    for (const template of slotTemplates) {
+      const instance = instanceByTemplate.get(template.id)?.[slot];
+      if (!instance) continue;
+      items.push({ id: instance.id, text: template.text, done: instance.done });
+    }
+    slotMap.set(slot, [...(slotMap.get(slot) ?? []), ...items]);
   }
 
   // 2. Custom/extracted tasks — under 'anytime'
@@ -1195,13 +1263,29 @@ export async function createTaskTemplate(
   type: TaskTemplate['type'],
   preset?: TaskTemplate['preset'],
   weekFrequency?: number,
+  slots?: DaySlot[],
 ): Promise<TaskTemplate> {
+  // Multi-slot presets store the full slot list; single-slot legacy data reads `preset`.
+  const cleanSlots = normalizeDaySlots(slots);
+  const resolvedSlots: DaySlot[] | undefined = type === 'preset'
+    ? (cleanSlots.length > 0
+        ? cleanSlots
+        : preset && DAY_SLOTS.includes(preset as DaySlot)
+          ? [preset as DaySlot]
+          : undefined)
+    : undefined;
+  if (type === 'preset' && (!resolvedSlots || resolvedSlots.length === 0)) {
+    // A daily preset must appear in at least one visible segment.
+    throw new Error('A daily preset must have at least one time slot');
+  }
+
   const template: TaskTemplate = {
     id: uuid(),
     text,
     type,
-    preset,
+    preset: type === 'preset' ? (resolvedSlots![0] ?? 'anytime') : preset,
     weekFrequency,
+    slots: resolvedSlots,
     order: 0,
     createdAt: new Date().toISOString(),
     active: true,
@@ -1209,25 +1293,31 @@ export async function createTaskTemplate(
 
   // Atomic: count existing + insert in one transaction to avoid race conditions
   await db.transaction('rw', db.taskTemplates, async () => {
-    let order = 0;
-    if (type === 'preset' && preset) {
+    if (type === 'preset' && template.slots && template.slots.length > 0) {
+      // Append each selected slot to the END of that segment's own list, so the
+      // new template never collides with a slot order previously set via setTemplateSlots.
+      const slotOrders: Partial<Record<JournalTaskSlot, number>> = {};
+      for (const s of template.slots) {
+        const siblings = await db.taskTemplates
+          .where('type').equals('preset')
+          .filter(t => t.active && getTemplateSlots(t).includes(s))
+          .toArray();
+        const maxOrder = siblings.reduce((mx, t) => Math.max(mx, orderInSlot(t, s)), -1);
+        slotOrders[s] = maxOrder + 1;
+      }
+      template.slotOrders = slotOrders;
+      // Scalar order stays a monotonic global counter (legacy fallback / stability).
+      // Count inactive templates too so a deactivated slot's order is never reused.
       const existing = await db.taskTemplates
         .where('type').equals('preset')
-        .filter(t => t.preset === preset && t.active)
         .toArray();
-      order = existing.length > 0
-        ? Math.max(...existing.map(t => t.order ?? 0)) + 1
-        : 0;
+      template.order = existing.reduce((mx, t) => Math.max(mx, t.order ?? 0), -1) + 1;
     } else if (type === 'weekly') {
       const existing = await db.taskTemplates
         .where('type').equals('weekly')
-        .filter(t => t.active)
         .toArray();
-      order = existing.length > 0
-        ? Math.max(...existing.map(t => t.order ?? 0)) + 1
-        : 0;
+      template.order = existing.reduce((mx, t) => Math.max(mx, t.order ?? 0), -1) + 1;
     }
-    template.order = order;
     await db.taskTemplates.add(template);
   });
 
@@ -1254,64 +1344,104 @@ export async function deactivateTemplate(id: string): Promise<void> {
   await db.taskTemplates.update(id, { active: false, updatedAt: new Date().toISOString() });
 }
 
-/** Move a task template to a different preset slot. Assigns order at end of new slot. */
-export async function moveTemplateToPreset(id: string, newPreset: TaskTemplate['preset']): Promise<void> {
-  const existing = await db.taskTemplates
-    .where('type').equals('preset')
-    .filter(t => t.preset === newPreset && t.active && t.id !== id)
-    .toArray();
-  await db.taskTemplates.update(id, {
-    preset: newPreset,
-    order: existing.length,
-    updatedAt: new Date().toISOString(),
+/**
+ * Set the exact set of time-of-day slots a preset applies to.
+ * Multi-slot templates show under every selected slot, each checked off separately.
+ */
+export async function setTemplateSlots(id: string, slots: DaySlot[]): Promise<void> {
+  const clean = normalizeDaySlots(slots);
+  if (clean.length === 0) {
+    // An active daily preset must appear in at least one segment.
+    throw new Error('A daily preset must have at least one time slot');
+  }
+  const now = new Date().toISOString();
+
+  await db.transaction('rw', db.taskTemplates, db.tasks, async () => {
+    const template = await db.taskTemplates.get(id);
+    if (!template) return;
+    if (template.type !== 'preset') {
+      throw new Error('Only preset templates can have daily time slots');
+    }
+    const oldSlots = getTemplateSlots(template);
+    const oldFirst = oldSlots[0];
+
+    // Materialize any legacy un-slotted instances to their original slot so they
+    // are not later reinterpreted against a (possibly changed) slot list.
+    if (oldFirst) {
+      await db.tasks.where('templateId').equals(id)
+        .filter(t => t.slot === undefined)
+        .modify(t => { t.slot = oldFirst; t.updatedAt = now; });
+    }
+
+    // Remove today's instances for slots that are being deactivated.
+    const removedSlots = oldSlots.filter(s => !(clean as JournalTaskSlot[]).includes(s));
+    if (removedSlots.length > 0) {
+      const today = localDateKey();
+      await db.tasks.where('templateId').equals(id)
+        .filter(t => t.date === today && (t.slot !== undefined && removedSlots.includes(t.slot)))
+        .delete();
+    }
+
+    // Per-slot display order: keep existing slot orders; append newly selected
+    // slots to the end of that segment's current list.
+    const oldSlotSet = new Set<JournalTaskSlot>(oldSlots);
+    const slotOrders: Partial<Record<JournalTaskSlot, number>> = {};
+    for (const s of clean) {
+      if (oldSlotSet.has(s)) {
+        slotOrders[s] = orderInSlot(template, s);
+      } else {
+        const siblings = await db.taskTemplates
+          .where('type').equals('preset')
+          .filter(t => t.active && t.id !== id && getTemplateSlots(t).includes(s))
+          .toArray();
+        const maxOrder = siblings.reduce((mx, t) => Math.max(mx, orderInSlot(t, s)), -1);
+        slotOrders[s] = maxOrder + 1;
+      }
+    }
+
+    await db.taskTemplates.update(id, {
+      slots: clean,
+      preset: clean[0],
+      slotOrders,
+      updatedAt: now,
+    });
   });
 }
 
 /**
- * Reorder a template within its preset slot.
- * Swaps the order values between the template and its neighbor in the given direction.
+ * Reorder a template within a specific slot.
+ * Uses per-slot ordering (`slotOrders`), so a multi-slot task can be ordered
+ * independently in each segment without disturbing the others.
  */
-export async function reorderTemplate(id: string, direction: 'up' | 'down'): Promise<void> {
-  const template = await db.taskTemplates.get(id);
-  if (!template || template.type !== 'preset' || !template.preset) return;
-
-  // Get all active presets in the same slot
-  const siblings = await db.taskTemplates
-    .where('type').equals('preset')
-    .filter(t => t.preset === template.preset && t.active)
-    .toArray();
-
-  // Atomic: normalize + reorder in one transaction
+export async function reorderTemplate(id: string, slot: DaySlot, direction: 'up' | 'down'): Promise<void> {
   await db.transaction('rw', db.taskTemplates, async () => {
-    // Normalize: ensure unique sequential order values
-    const orders = siblings.map(t => t.order ?? 0);
-    const hasDuplicates = new Set(orders).size !== orders.length;
-    const allSame = new Set(orders).size <= 1;
-    if (hasDuplicates || allSame) {
-      siblings.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-      for (let i = 0; i < siblings.length; i++) {
-        await db.taskTemplates.update(siblings[i].id, { order: i, updatedAt: new Date().toISOString() });
-      }
-    }
+    const template = await db.taskTemplates.get(id);
+    if (!template || template.type !== 'preset') return;
+    if (!getTemplateSlots(template).includes(slot)) return;
 
-    // Re-sort after normalization
-    siblings.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    // Active presets sharing this slot only
+    const siblings = await db.taskTemplates
+      .where('type').equals('preset')
+      .filter(t => t.active && getTemplateSlots(t).includes(slot))
+      .toArray();
+
+    siblings.sort((a, b) =>
+      orderInSlot(a, slot) - orderInSlot(b, slot) || a.createdAt.localeCompare(b.createdAt));
 
     const idx = siblings.findIndex(t => t.id === id);
     if (idx === -1) return;
+    const target = direction === 'up' ? idx - 1 : idx + 1;
+    if (target < 0 || target >= siblings.length) return;
 
-    const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
-    if (swapIdx < 0 || swapIdx >= siblings.length) return;
+    // Swap in place, then reassign sequential order for the whole slot group.
+    [siblings[idx], siblings[target]] = [siblings[target], siblings[idx]];
 
-    // Move: take item out, insert at new position, reassign all order values
-    const [moved] = siblings.splice(idx, 1);
-    siblings.splice(swapIdx, 0, moved);
-
-    // Assign sequential order values to entire slot
-    const toUpdate = siblings.filter((t, i) => t.order !== i);
-    if (toUpdate.length > 0) {
-      await db.taskTemplates.bulkPut(toUpdate.map((t, i) => ({ ...t, order: i, updatedAt: new Date().toISOString() })));
-    }
+    const now = new Date().toISOString();
+    await db.taskTemplates.bulkPut(siblings.map((t, i) => ({
+      ...t,
+      slotOrders: { ...t.slotOrders, [slot]: i },
+      updatedAt: now,
+    })));
   });
 }
 
@@ -1333,36 +1463,64 @@ export async function deleteTaskTemplate(id: string): Promise<void> {
 
 /**
  * Ensure today's task instances exist for all active daily preset templates.
- * Creates a Task for each preset template if one doesn't already exist for today.
+ * Creates a Task per (template × slot) so multi-slot tasks can be checked
+ * off independently in each time-of-day segment. Runs atomically so concurrent
+ * callers (tasks page, journal view, notifications) can never duplicate an instance.
  */
 export async function ensureDailyPresetInstances(): Promise<void> {
   const today = localDateKey();
-  const presets = await getTemplatesByType('preset');
-  if (presets.length === 0) return;
+  // Read-check-add inside a single rw transaction: IndexedDB serializes rw
+  // transactions over this scope, so overlapping calls cannot both insert.
+  await db.transaction('rw', db.taskTemplates, db.tasks, async () => {
+    const presets = await getTemplatesByType('preset');
+    if (presets.length === 0) return;
+    const presetsById = new Map(presets.map(p => [p.id, p]));
 
-  // Single query: get all today's tasks that have a templateId
-  const todayTasks = await db.tasks
-    .where('date').equals(today)
-    .filter(t => !!t.templateId)
-    .toArray();
-  const existingByTemplate = new Set(todayTasks.map(t => t.templateId));
+    // Track which (template, slot) pairs already have an instance today.
+    // Legacy single-slot instances (no `slot` field) cover their template's first slot.
+    const covered = new Map<string, Set<string>>();
+    const todayTasks = await db.tasks
+      .where('date').equals(today)
+      .filter(t => !!t.templateId)
+      .toArray();
+    for (const t of todayTasks) {
+      const tpl = t.templateId ? presetsById.get(t.templateId) : undefined;
+      if (t.slot) {
+        const set = covered.get(t.templateId!) ?? new Set<string>();
+        set.add(t.slot);
+        covered.set(t.templateId!, set);
+      } else if (tpl) {
+        const first = getTemplateSlots(tpl)[0];
+        if (first) {
+          const set = covered.get(t.templateId!) ?? new Set<string>();
+          set.add(first);
+          covered.set(t.templateId!, set);
+        }
+      }
+    }
 
-  // Only create instances for templates that don't have one today
-  const toCreate = presets
-    .filter(t => !existingByTemplate.has(t.id))
-    .map(template => ({
-      id: uuid(),
-      text: template.text,
-      date: today,
-      done: false,
-      createdAt: new Date().toISOString(),
-      source: 'manual' as const,
-      templateId: template.id,
-    }));
+    const toCreate: { id: string; text: string; date: string; done: boolean; createdAt: string; source: 'manual'; templateId: string; slot: JournalTaskSlot }[] = [];
+    for (const template of presets) {
+      const coveredSlots = covered.get(template.id) ?? new Set<string>();
+      for (const slot of getTemplateSlots(template)) {
+        if (coveredSlots.has(slot)) continue;
+        toCreate.push({
+          id: uuid(),
+          text: template.text,
+          date: today,
+          done: false,
+          createdAt: new Date().toISOString(),
+          source: 'manual',
+          templateId: template.id,
+          slot,
+        });
+      }
+    }
 
-  if (toCreate.length > 0) {
-    await db.tasks.bulkAdd(toCreate);
-  }
+    if (toCreate.length > 0) {
+      await db.tasks.bulkAdd(toCreate);
+    }
+  });
 }
 
 /**
@@ -1444,7 +1602,7 @@ export async function getWeeklyTaskInstances(
  * Get all active templates with their current week's instance status.
  */
 export async function getTemplatesWithStatus(): Promise<{
-  presets: { template: TaskTemplate; instance?: Task }[];
+  presets: { template: TaskTemplate; instances: Partial<Record<JournalTaskSlot, Task>> }[];
   weekly: { template: TaskTemplate; done: number; total: number; frequency: number }[];
 }> {
   const today = localDateKey();
@@ -1457,12 +1615,20 @@ export async function getTemplatesWithStatus(): Promise<{
     .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt.localeCompare(b.createdAt));
   const presets = await Promise.all(
     presetTemplates.map(async (template) => {
-      const instance = await db.tasks
+      const slots = getTemplateSlots(template);
+      const dayInstances = await db.tasks
         .where('templateId')
         .equals(template.id)
         .filter(t => t.date === today)
-        .first();
-      return { template, instance };
+        .toArray();
+      // Map each instance to its slot; legacy no-slot instances go to slot[0].
+      const instances: Partial<Record<JournalTaskSlot, Task>> = {};
+      for (const slot of slots) instances[slot] = undefined;
+      for (const t of dayInstances) {
+        const slot = t.slot ?? slots[0];
+        if (slot && slots.includes(slot)) instances[slot] = t;
+      }
+      return { template, instances };
     }),
   );
 
