@@ -3,3 +3,6 @@ dist/
 .DS_Store
 drift-v*.tar.gz
 drift-v*.zip
+review-batches/
+scripts/kimi_review.py
+scripts/kimi_final.py

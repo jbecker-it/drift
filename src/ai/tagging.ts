@@ -28,14 +28,16 @@ export interface TaggingResult {
  * Runs fire-and-forget on entry save. Tracks status on the entry itself (#10).
  */
 export async function tagEntry(entry: JournalEntry): Promise<EntryTags | null> {
+  const apiKey = await getApiKey();
+  const model = await getBackgroundModel();
+  // AI not configured — bail silently instead of recording a "failed" state that
+  // can never succeed and shows a misleading retry button.
+  if (!apiKey) return null;
+
   // Mark as pending
   await updateEntry(entry.id, { taggingStatus: 'pending' });
 
   try {
-    const apiKey = await getApiKey();
-    const model = await getBackgroundModel();
-    if (!apiKey) throw new Error('API key not set');
-
     const messages = getEntryTaggingPrompt(entry.body);
     const raw = await chatComplete(
       messages,
@@ -46,7 +48,14 @@ export async function tagEntry(entry: JournalEntry): Promise<EntryTags | null> {
 
     // Parse JSON response — strip any markdown fences the model might add
     const cleaned = raw.replace(/^```json?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
-    const parsed: TaggingResult = JSON.parse(cleaned);
+    const parsed: Partial<TaggingResult> = JSON.parse(cleaned);
+
+    // Defensively validate the parsed shape (json_object guarantees valid JSON,
+    // NOT schema conformance). A malformed response must never reach IndexedDB
+    // and crash entry rendering — mirror the validation used in ai/context.ts.
+    const asStrArr = (v: any): string[] =>
+      Array.isArray(v) ? v.filter((x: any) => typeof x === 'string') : [];
+    const mentions = (parsed.mentions ?? {}) as Record<string, any>;
 
     // Verify entry still exists and save tags atomically (prevents orphan after delete)
     const tags = await db.transaction('rw', db.entries, db.entryTags, async () => {
@@ -54,18 +63,22 @@ export async function tagEntry(entry: JournalEntry): Promise<EntryTags | null> {
       if (!entryStillExists) return null;
       return saveEntryTags({
         entryId: entry.id,
-        topics: parsed.topics ?? [],
+        topics: asStrArr(parsed.topics).slice(0, 5),
         mentions: {
-          sleep_hours: parsed.mentions?.sleep_hours ?? null,
-          mood_words: parsed.mentions?.mood_words ?? [],
-          tasks_open: parsed.mentions?.tasks_open ?? [],
-          tasks_done: parsed.mentions?.tasks_done ?? [],
-          people: parsed.mentions?.people ?? [],
+          sleep_hours: typeof mentions.sleep_hours === 'number' ? mentions.sleep_hours : null,
+          mood_words: asStrArr(mentions.mood_words),
+          tasks_open: asStrArr(mentions.tasks_open),
+          tasks_done: asStrArr(mentions.tasks_done),
+          people: asStrArr(mentions.people),
         },
-        one_line_summary: parsed.one_line_summary ?? '',
+        one_line_summary: typeof parsed.one_line_summary === 'string' ? parsed.one_line_summary : '',
         taggedAt: new Date().toISOString(),
       });
     });
+
+    // Entry was deleted mid-tag (transaction returned null) — don't write status
+    // to a gone entry and don't report a spurious completion.
+    if (tags === null) return null;
 
     // Mark as complete
     await updateEntry(entry.id, { taggingStatus: 'complete', taggingError: undefined });

@@ -69,6 +69,12 @@ export default function JournalPage() {
   const isSavingRef = useRef(false);
   // Session token — incremented on Done/new entry to invalidate stale auto-save callbacks
   const draftSessionRef = useRef(0);
+  // Last-persisted body/mood — used by handleDone to catch edits made after the
+  // first save (user typed more but clicked Done instead of Update).
+  const lastSavedRef = useRef<{ body: string; mood: number | undefined }>({ body: '', mood: undefined });
+  // Tracks whether the user has typed since mount, so draft recovery can't clobber
+  // in-progress input.
+  const touchedRef = useRef(false);
 
   // Cleanup: abort all in-flight streams when component unmounts
   useEffect(() => {
@@ -97,7 +103,7 @@ export default function JournalPage() {
     if (activeEntryId) return; // Don't recover if already editing
     (async () => {
       const drafts = await db.entries.filter(e => e.isDraft).sortBy('created');
-      if (drafts.length > 0) {
+      if (drafts.length > 0 && !touchedRef.current) {
         const draft = drafts[drafts.length - 1]; // Most recent draft (sortBy is ascending)
         setBody(draft.body);
         setMood(draft.mood);
@@ -204,9 +210,15 @@ export default function JournalPage() {
       try { await autoSaveChain.current; } catch { /* auto-save failed, continue with manual save */ }
 
       let entryId = activeEntryId;
+      // Tagging/extraction runs fire-and-forget in the branches below; this chain
+      // lets us await it before reflection so newly extracted tasks are present in
+      // the reflection context. Failures never block (already .catch'd).
+      let taggingChain: Promise<void> = Promise.resolve();
 
       if (entryId) {
-        // Updating existing entry
+        // Updating existing entry. Capture a narrowed const — `entryId` is
+        // `string | null` and TS can't narrow it inside the async .then closure.
+        const currentEntryId = entryId;
         await updateEntry(entryId, {
           body,
           mood,
@@ -214,11 +226,29 @@ export default function JournalPage() {
         });
         // Re-tag with updated content — use original entry's created date
         const existingEntry = await db.entries.get(entryId);
-        const editEntry = { id: entryId, body, created: existingEntry?.created || new Date().toISOString(), isDraft: false, wordCount: body.split(/\s+/).filter(Boolean).length };
-        // Remove old extracted tasks for this entry before re-extracting
-        await db.tasks.where('entryId').equals(entryId).filter(t => t.source === 'extracted').delete();
-        tagEntry(editEntry).then(async () => {
+        const editEntry = { id: currentEntryId, body, created: existingEntry?.created || new Date().toISOString(), isDraft: false, wordCount: body.split(/\s+/).filter(Boolean).length };
+        // Re-tag after edit. Do NOT delete extracted tasks first — if tagging
+        // fails we keep the existing tasks, and on success we re-extract then
+        // drop only the now-stale ones while preserving the user's completion.
+        taggingChain = tagEntry(editEntry).then(async () => {
+          const oldExtracted = await db.tasks.where('entryId').equals(currentEntryId).filter(t => t.source === 'extracted').toArray();
+          const oldDoneByText = new Map(oldExtracted.filter(t => t.done).map(t => [t.text, true]));
+
           await extractTasksFromTags(editEntry as JournalEntry);
+          const fresh = await db.tasks.where('entryId').equals(currentEntryId).filter(t => t.source === 'extracted').toArray();
+          const freshTexts = new Set(fresh.map(t => t.text));
+
+          // Remove extracted tasks that are no longer extracted by the new content.
+          // Use deleteTask (tombstones best-effort) so the removal propagates via
+          // WebDAV instead of being resurrected on the next pull.
+          const toDelete = oldExtracted.filter(t => !freshTexts.has(t.text)).map(t => t.id);
+          for (const id of toDelete) await deleteTask(id);
+
+          // Preserve completion: re-mark tasks the user had checked off if they
+          // were recreated as undone by the re-extraction.
+          for (const t of fresh) {
+            if (!t.done && oldDoneByText.has(t.text)) await toggleTask(t.id);
+          }
           await loadTasks();
         }).catch(() => {});
       } else {
@@ -239,7 +269,7 @@ export default function JournalPage() {
 
         // Fire-and-forget: auto-tag, extract tasks, then refresh context
         const entryForTagging = { id: entry.id, body, created: entry.created, isDraft: false, wordCount: entry.wordCount };
-        tagEntry(entryForTagging).then(async () => {
+        taggingChain = tagEntry(entryForTagging).then(async () => {
           await extractTasksFromTags(entryForTagging as JournalEntry);
           await loadTasks();
           const shouldRefresh = await shouldRefreshContext();
@@ -252,6 +282,14 @@ export default function JournalPage() {
         const totalWords = allNonDraft.reduce((s, e) => s + e.wordCount, 0);
         checkAndAwardAchievements(totalEntries, totalWords).catch(() => {});
       }
+
+      // Record what we just persisted so handleDone can detect edits made after
+      // the first save (user typed more but clicked Done instead of Update).
+      lastSavedRef.current = { body, mood };
+
+      // Ensure tagging/extraction landed so this entry's own tasks appear in the
+      // reflection/task context (failures are already caught and won't block).
+      await taggingChain;
 
       await loadEntries();
 
@@ -277,6 +315,8 @@ export default function JournalPage() {
     if (entry) {
       setBody(entry.body);
       setMood(entry.mood);
+      // The entry now holds the just-loaded text — mark it as the saved baseline.
+      lastSavedRef.current = { body: entry.body, mood: entry.mood };
       setShowContinue(false);
       setReflection('');
       setActiveEntryId(entry.id);
@@ -285,13 +325,25 @@ export default function JournalPage() {
   };
 
   // ─── Done (finish this entry) ──────────────────────
-  const handleDone = () => {
+  const handleDone = async () => {
     // Abort any in-flight reflection or tagging
     reflectAbortRef.current?.abort();
     savedReflectAbortRef.current?.abort();
     // Invalidate any pending auto-save callbacks
     draftSessionRef.current++;
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+
+    // Persist any edits made after the last save. The entry stays editable after
+    // the first save ("Add more or tap Done"), so Done must flush unsaved text
+    // rather than silently discarding it (blocker for 1.0).
+    if (activeEntryId && (body !== lastSavedRef.current.body || mood !== lastSavedRef.current.mood)) {
+      await updateEntry(activeEntryId, {
+        body,
+        mood,
+        wordCount: body.split(/\s+/).filter(Boolean).length,
+      }).catch(() => {});
+    }
+
     setBody('');
     setMood(undefined);
     setReflection('');
@@ -340,6 +392,7 @@ export default function JournalPage() {
 
   // ─── Expand / Edit / Delete (recent entries) ───────
   const handleEditEntry = (entry: JournalEntry) => {
+    touchedRef.current = true; // a user-driven load must never be clobbered by draft recovery
     setActiveEntryId(entry.id);
     setBody(entry.body);
     setMood(entry.mood);
@@ -358,11 +411,13 @@ export default function JournalPage() {
 
   const handleReflectSaved = async (entry: JournalEntry) => {
     const id = entry.id;
-    setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: '...' } : e));
+    const prevReflection = entry.aiReflection;
     try {
       const apiKey = await getApiKey();
       const model = await getModel();
-      if (!apiKey) return;
+      if (!apiKey) return; // don't show a stuck '...' when no key is configured
+
+      setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: '...' } : e));
 
       savedReflectAbortRef.current?.abort();
       savedReflectAbortRef.current = new AbortController();
@@ -383,8 +438,14 @@ export default function JournalPage() {
       }
       await updateEntry(id, { aiReflection: result });
     } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: 'Error.' } : e));
+      if (err.name === 'AbortError') {
+        // Superseded — restore whatever was there before.
+        setRecentEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: prevReflection } : e));
+      } else {
+        // Never overwrite a saved reflection with an error string.
+        setRecentEntries(prev => prev.map(e => e.id === id
+          ? { ...e, aiReflection: prevReflection || 'Could not generate reflection.' }
+          : e));
       }
     }
   };
@@ -593,7 +654,7 @@ export default function JournalPage() {
         <textarea
           ref={textareaRef}
           value={body}
-          onChange={(e) => setBody(e.target.value)}
+          onChange={(e) => { touchedRef.current = true; setBody(e.target.value); }}
           onKeyDown={handleKeyDown}
           placeholder="Dump your thoughts here. No judgment."
           aria-label="Journal entry"

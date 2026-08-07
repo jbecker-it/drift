@@ -1,12 +1,12 @@
 {
   "name": "drift",
   "private": true,
-  "version": "0.6.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "tsx --test scripts/slot-test.test.ts",
+    "test": "tsx --test scripts/*.test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },

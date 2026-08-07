@@ -189,9 +189,12 @@ export default function SettingsPage() {
         setSetting('openrouter_background_model', bgModelSame ? 'same' : bgModel),
         setSetting('personality', personality),
       ]);
-      // Route notification save through the serialized chain
-      notifSaveChain.current = notifSaveChain.current.then(() => saveNotificationSettings(notifSettings));
-      await notifSaveChain.current;
+      // Route notification save through the serialized chain. On failure, keep the
+      // chain alive (store a caught copy as the head) so one bad save can never
+      // permanently poison future notification saves.
+      const notifSave = notifSaveChain.current.then(() => saveNotificationSettings(notifSettings));
+      notifSaveChain.current = notifSave.catch(() => {});
+      await notifSave;
       await scheduleNotifications();
       setSaved(true);
       setSaveError(null);
@@ -297,6 +300,13 @@ export default function SettingsPage() {
     setSyncNow(true);
     setSyncResult(null);
     try {
+      // Flush any pending debounced sync-config save so we sync against the config
+      // the user can currently see, not stale credentials from a previous save.
+      if (syncSaveTimerRef.current) {
+        clearTimeout(syncSaveTimerRef.current);
+        syncSaveTimerRef.current = null;
+        await saveSyncConfig(syncConfig);
+      }
       const result = await performSync();
       setSyncResult(result.error ? { ok: false, error: result.error } : { ok: true });
       if (result.lastSync) setLastSync(result.lastSync);

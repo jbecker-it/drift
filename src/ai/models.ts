@@ -46,12 +46,14 @@ interface ModelCache {
   fetchedAt: number;
 }
 
-async function getCachedModels(): Promise<OpenRouterModel[] | null> {
+async function getCachedModels(ignoreTtl = false): Promise<OpenRouterModel[] | null> {
   const cached = await db.settings.get(CACHE_KEY);
   if (!cached) return null;
   try {
     const parsed: ModelCache = JSON.parse(cached.value);
-    if (Date.now() - parsed.fetchedAt < CACHE_TTL) {
+    // ignoreTtl is used as an offline fallback: return stale-but-usable data
+    // when the network is unavailable rather than blanking the model picker.
+    if (ignoreTtl || Date.now() - parsed.fetchedAt < CACHE_TTL) {
       return parsed.models;
     }
   } catch {}
@@ -80,8 +82,9 @@ export async function fetchModels(forceRefresh = false): Promise<OpenRouterModel
     await cacheModels(models);
     return models;
   } catch (err) {
-    // Fallback to stale cache if API fails
-    const cached = await getCachedModels();
+    // Fallback to stale cache (even if expired) when the API fails — better a
+    // slightly stale picker than none (offline / rate-limited).
+    const cached = await getCachedModels(true);
     if (cached) return cached;
     throw err;
   }

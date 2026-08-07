@@ -25,7 +25,9 @@ function downloadJson(data: string, filename: string) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // Revoke after the download has a chance to start (immediate revoke can cancel
+  // downloads in some browsers, silently removing the promised safety backup).
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export default function Onboarding({ onComplete }: { onComplete: () => void }) {
@@ -262,27 +264,28 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
         }
       }
 
-      // #23: Initialize sync after saving config — but only if the user
-      // entered sync details in the dedicated sync step (step 6).
-      // If they already configured sync during restore, skip to avoid double-pulling.
+      // #23: Initialize sync — but only if the user entered sync details in the
+      // dedicated sync step (step 6). Sync is OPTIONAL: test the connection FIRST,
+      // persist only a verified config (so we never enable background sync against
+      // a dead/unreachable server), and never block finishing onboarding on it.
       if (syncUrl) {
         try {
           const syncConfig = { enabled: true, serverUrl: syncUrl, username: syncUser, password: syncPass };
-          await saveSyncConfig(syncConfig);
-          // Test the connection and do an initial pull.
           const testResult = await testConnection(syncConfig);
           if (testResult.ok) {
+            await saveSyncConfig(syncConfig);
             try {
               await pullFromServerSafe();
-            } catch {
-              errors.push('Sync configured but initial pull failed');
+            } catch (err) {
+              // Non-blocking — sync is best-effort; user can retry in Settings.
+              console.warn('Drift: initial sync pull failed after onboarding', err);
             }
           } else {
-            errors.push(`Sync configured but connection failed: ${testResult.error || 'unknown error'}`);
+            console.warn('Drift: sync not enabled — connection failed during onboarding', testResult.error);
           }
         } catch (err) {
-          console.error('Drift: failed to configure sync', err);
-          errors.push('Failed to save sync configuration');
+          // Never block onboarding completion on an optional feature.
+          console.warn('Drift: failed to configure sync during onboarding (non-blocking)', err);
         }
       }
 

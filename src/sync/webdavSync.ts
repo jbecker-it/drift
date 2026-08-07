@@ -52,6 +52,18 @@ export interface SyncStatus {
 const SYNC_FILE = 'drift-data.json';
 // Sensitive keys excluded from export
 
+// Serialize tombstone reads/writes so concurrent deletions can't lose a
+// tombstone (read-modify-write is not atomic on the settings key-value store).
+let tombstoneQueue: Promise<unknown> = Promise.resolve();
+
+/** Run a function serially with respect to other tombstone mutations. */
+function withTombstoneLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = tombstoneQueue.then(fn, fn);
+  // Keep the queue alive even if the operation rejects.
+  tombstoneQueue = run.catch(() => {});
+  return run;
+}
+
 // ─── Helpers ────────────────────────────────────────
 
 /** Get the correct primary key for a record based on table name.
@@ -60,11 +72,19 @@ export function getRecordKey(table: string, record: any): string {
   return table === 'entryTags' ? record.entryId : record.id;
 }
 
-/** Build auth headers from config. Uses UTF-8-safe base64 encoding. */
+/** Produce a user-friendly error message from a WebDAV response. */
+function authFailed(response: Response): string {
+  if (response.status === 401 || response.status === 403) {
+    return `Authentication failed (${response.status}). Check your WebDAV username/password.`;
+  }
+  return `Server returned ${response.status}`;
+}
+
+/** Build auth headers from config. Uses UTF-8-safe base64 encoding.
+ *  Does NOT force a Content-Type — callers set it per request method
+ *  (PROPFIND should not send application/json, which some servers reject). */
 function authHeaders(config: SyncConfig): Record<string, string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
+  const headers: Record<string, string> = {};
   if (config.username && config.password) {
     // UTF-8 safe base64 encoding
     const raw = `${config.username}:${config.password}`;
@@ -72,6 +92,27 @@ function authHeaders(config: SyncConfig): Record<string, string> {
     headers['Authorization'] = `Basic ${encoded}`;
   }
   return headers;
+}
+
+/** JSON content-type header merged on top of auth headers for body-bearing requests. */
+function jsonHeaders(config: SyncConfig): Record<string, string> {
+  return { ...authHeaders(config), 'Content-Type': 'application/json' };
+}
+
+// AbortController-based fetch with timeout so a hung WebDAV server can never
+// block the UI / background sync forever.
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = 30000,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -128,7 +169,9 @@ function validateRemotePayload(data: any): data is Record<string, any[]> {
     if (!validTables.includes(key)) continue;
     if (!Array.isArray(data[key])) return false;
     for (const record of data[key]) {
-      if (!record || typeof record !== 'object' || typeof record.id !== 'string') return false;
+      if (!record || typeof record !== 'object') return false;
+      // Key-aware: entryTags use entryId as their primary key, not `id`.
+      if (typeof getRecordKey(key, record) !== 'string') return false;
     }
   }
   return true;
@@ -168,15 +211,15 @@ export async function isSyncEnabled(): Promise<boolean> {
 export async function testConnection(config: SyncConfig): Promise<{ ok: boolean; error?: string }> {
   try {
     const baseUrl = parseWebDAVUrl(config.serverUrl);
-    const response = await fetch(baseUrl.toString(), {
+    const response = await fetchWithTimeout(baseUrl.toString(), {
       method: 'PROPFIND',
       headers: {
         ...authHeaders(config),
         Depth: '0',
       },
-    });
+    }, 15000);
     if (response.ok) return { ok: true };
-    return { ok: false, error: `Server returned ${response.status}` };
+    return { ok: false, error: authFailed(response) };
   } catch (err: any) {
     return { ok: false, error: err.message || 'Connection failed' };
   }
@@ -189,25 +232,27 @@ export async function recordDeletion(table: string, recordId: string): Promise<v
   await recordDeletions([{ table, recordId }]);
 }
 
-/** Record multiple deletions atomically (avoids read-modify-write race). */
+/** Record multiple deletions atomically (serialized to avoid read-modify-write races). */
 export async function recordDeletions(deletions: { table: string; recordId: string }[]): Promise<void> {
-  const tombstones = await getTombstones();
-  const now = new Date().toISOString();
-  for (const { table, recordId } of deletions) {
-    const tombstone: Tombstone = {
-      id: `${table}:${recordId}`,
-      table,
-      recordId,
-      deletedAt: now,
-    };
-    const existing = tombstones.findIndex(t => t.id === tombstone.id);
-    if (existing >= 0) {
-      tombstones[existing] = tombstone;
-    } else {
-      tombstones.push(tombstone);
+  await withTombstoneLock(async () => {
+    const tombstones = await getTombstones();
+    const now = new Date().toISOString();
+    for (const { table, recordId } of deletions) {
+      const tombstone: Tombstone = {
+        id: `${table}:${recordId}`,
+        table,
+        recordId,
+        deletedAt: now,
+      };
+      const existing = tombstones.findIndex(t => t.id === tombstone.id);
+      if (existing >= 0) {
+        tombstones[existing] = tombstone;
+      } else {
+        tombstones.push(tombstone);
+      }
     }
-  }
-  await setSetting('sync_tombstones', JSON.stringify(tombstones));
+    await setSetting('sync_tombstones', JSON.stringify(tombstones));
+  });
 }
 
 /** Get all tombstones. */
@@ -224,14 +269,16 @@ async function saveTombstones(tombstones: Tombstone[]): Promise<void> {
 
 /** Garbage-collect tombstones older than 30 days. */
 export async function gcTombstones(): Promise<void> {
-  const tombstones = await getTombstones();
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 30);
-  const cutoffStr = cutoff.toISOString();
-  const kept = tombstones.filter(t => t.deletedAt > cutoffStr);
-  if (kept.length !== tombstones.length) {
-    await saveTombstones(kept);
-  }
+  await withTombstoneLock(async () => {
+    const tombstones = await getTombstones();
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 30);
+    const cutoffStr = cutoff.toISOString();
+    const kept = tombstones.filter(t => t.deletedAt > cutoffStr);
+    if (kept.length !== tombstones.length) {
+      await saveTombstones(kept);
+    }
+  });
 }
 
 // ─── Push ───────────────────────────────────────────
@@ -263,13 +310,13 @@ export async function pushToServer(): Promise<void> {
 
   const baseUrl = parseWebDAVUrl(config.serverUrl);
   const data = await buildSyncPayload();
-  const response = await fetch(baseUrl.toString() + SYNC_FILE, {
+  const response = await fetchWithTimeout(baseUrl.toString() + SYNC_FILE, {
     method: 'PUT',
-    headers: authHeaders(config),
+    headers: jsonHeaders(config),
     body: data,
   });
 
-  if (!response.ok) throw new Error(`Push failed: ${response.status}`);
+  if (!response.ok) throw new Error(`Push failed: ${authFailed(response)}`);
   await setSetting('sync_last_push', new Date().toISOString());
 }
 
@@ -289,13 +336,13 @@ export async function pullFromServerSafe(): Promise<{ conflicts: SyncConflict[];
   if (!config.enabled || !config.serverUrl) return { conflicts: [], backedUp: false };
 
   const baseUrl = parseWebDAVUrl(config.serverUrl);
-  const response = await fetch(baseUrl.toString() + SYNC_FILE, {
+  const response = await fetchWithTimeout(baseUrl.toString() + SYNC_FILE, {
     method: 'GET',
     headers: authHeaders(config),
   });
 
   if (response.status === 404) return { conflicts: [], backedUp: false };
-  if (!response.ok) throw new Error(`Pull failed: ${response.status}`);
+  if (!response.ok) throw new Error(`Pull failed: ${authFailed(response)}`);
 
   const remote = await response.json();
 
@@ -343,9 +390,9 @@ export async function pullFromServerSafe(): Promise<{ conflicts: SyncConflict[];
     };
     const backupName = `drift-conflicts-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     try {
-      const backupResponse = await fetch(baseUrl.toString() + backupName, {
+      const backupResponse = await fetchWithTimeout(baseUrl.toString() + backupName, {
         method: 'PUT',
-        headers: authHeaders(config),
+        headers: jsonHeaders(config),
         body: JSON.stringify(backupData, null, 2),
       });
       if (backupResponse.ok) {
@@ -356,10 +403,14 @@ export async function pullFromServerSafe(): Promise<{ conflicts: SyncConflict[];
     }
   }
 
-  // Phase 3: Merge (transactional)
-  const VALID_SYNC_TABLES = ['entries', 'entryTags', 'sessions', 'rewards', 'moods', 'tasks', 'taskTemplates', 'contextMemory'];
+  // Phase 3: Merge (transactional). Serialized with the tombstone lock so a
+  // concurrent user deletion (recordDeletions) can't interleave reads/writes of
+  // the sync_tombstones key and clobber a freshly-written tombstone (which would
+  // let a deleted record resurrect on the next pull).
+  await withTombstoneLock(() =>
+    (db as any).transaction('rw', [db.entries, db.entryTags, db.sessions, db.rewards, db.moods, db.tasks, db.taskTemplates, db.contextMemory, db.settings], async () => {
+      const VALID_SYNC_TABLES = ['entries', 'entryTags', 'sessions', 'rewards', 'moods', 'tasks', 'taskTemplates', 'contextMemory'];
 
-  await (db as any).transaction('rw', [db.entries, db.entryTags, db.sessions, db.rewards, db.moods, db.tasks, db.taskTemplates, db.contextMemory, db.settings], async () => {
       // --- Merge local + remote tombstones to prevent resurrection ---
       const localTombstones = await getTombstones();
       const remoteTombstones: Tombstone[] = (Array.isArray(remote.tombstones) ? remote.tombstones : [])
@@ -425,7 +476,7 @@ export async function pullFromServerSafe(): Promise<{ conflicts: SyncConflict[];
       if (allTombstones.length > 0) {
         await saveTombstones(allTombstones);
       }
-    },
+    }),
   );
 
   await setSetting('sync_last_pull', new Date().toISOString());
@@ -466,12 +517,20 @@ export async function getLastSyncTime(): Promise<string | null> {
 /**
  * Perform full sync: pull first (to detect conflicts), then push.
  * Pull MUST happen before push to avoid overwriting remote changes.
+ * Guarded by a mutex so overlapping calls (debounced, periodic, manual)
+ * are coalesced instead of racing two pull-then-push sequences.
  */
+let syncInProgress = false;
+
 export async function performSync(): Promise<SyncStatus> {
   const status: SyncStatus = {
     lastSync: null, error: null, syncing: true,
     pushOk: false, pullOk: false, conflictCount: 0, backedUp: false,
   };
+  if (syncInProgress) {
+    return { ...status, syncing: false, error: 'A sync is already in progress.' };
+  }
+  syncInProgress = true;
   try {
     // Pull FIRST — detect and handle conflicts before overwriting remote
     const { conflicts, backedUp } = await pullFromServerSafe();
@@ -487,12 +546,15 @@ export async function performSync(): Promise<SyncStatus> {
     await setSetting('sync_last_sync', status.lastSync);
 
     if (conflicts.length > 0) {
-      status.error = `${conflicts.length} conflict${conflicts.length > 1 ? 's' : ''} resolved (server version kept, local backed up)`;
+      status.error = backedUp
+        ? `${conflicts.length} conflict${conflicts.length > 1 ? 's' : ''} resolved — server version kept, local copies backed up to server`
+        : `${conflicts.length} conflict${conflicts.length > 1 ? 's' : ''} resolved — server version kept; WARNING: backing up local copies FAILED, conflicting local edits were overwritten`;
     }
   } catch (err: any) {
     status.error = err.message || 'Sync failed';
   } finally {
     status.syncing = false;
+    syncInProgress = false;
   }
   return status;
 }
@@ -510,7 +572,7 @@ export async function fetchForRestore(config: SyncConfig): Promise<{
 }> {
   try {
     const baseUrl = parseWebDAVUrl(config.serverUrl);
-    const response = await fetch(baseUrl.toString() + SYNC_FILE, {
+    const response = await fetchWithTimeout(baseUrl.toString() + SYNC_FILE, {
       method: 'GET',
       headers: authHeaders(config),
     });

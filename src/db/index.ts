@@ -277,6 +277,7 @@ export async function saveEntry(body: string, mood?: number, tags?: string[]): P
     wordCount: body.split(/\s+/).filter(Boolean).length,
   };
   await db.entries.add(entry);
+  triggerSync();
   return entry;
 }
 
@@ -310,6 +311,7 @@ export async function finalizeDraft(
   await db.entries.update(draftId, { ...updates, updatedAt: new Date().toISOString() });
   const entry = await db.entries.get(draftId);
   if (!entry) throw new Error('Draft not found after finalization');
+  triggerSync();
   return entry;
 }
 
@@ -339,6 +341,7 @@ export async function updateEntry(id: string, updates: Partial<JournalEntry>): P
       }
     }
   }
+  triggerSync();
 }
 
 /**
@@ -378,6 +381,8 @@ export async function deleteEntry(id: string): Promise<void> {
       await db.tasks.where('entryId').equals(id).delete();
     },
   );
+  // Push the deletion tombstones to the server so they propagate to other devices.
+  triggerSync();
 }
 
 /** Get non-draft entries only, ordered newest first. */
@@ -875,6 +880,9 @@ export async function importFromJson(jsonString: string): Promise<{
 
     const dbTables = IMPORT_TABLES.map(t => (db as any)[t]).filter(Boolean);
     // Also need settings for tombstone persistence
+    // Load the tombstone helper OUTSIDE the transaction — an awaited dynamic
+    // import() inside a Dexie transaction can break the transaction context.
+    const { getTombstones } = await import('../sync/webdavSync');
     await db.transaction(
       'rw',
       [...dbTables, db.settings],
@@ -911,7 +919,6 @@ export async function importFromJson(jsonString: string): Promise<{
 
         // Persist tombstones locally so they survive push
         if (tombstones.length > 0) {
-          const { getTombstones } = await import('../sync/webdavSync');
           // Merge: local tombstones + imported tombstones (newer wins)
           const localTombstones = await getTombstones();
           const tombstoneMap = new Map<string, any>();
@@ -1015,15 +1022,20 @@ export async function toggleTask(id: string): Promise<void> {
 
 /** Delete a task. Records a tombstone for sync. */
 export async function deleteTask(id: string): Promise<void> {
-  const { recordDeletion } = await import('../sync/webdavSync');
-  await recordDeletion('tasks', id);
+  // Best-effort tombstone: a local-first app must never let sync bookkeeping
+  // (a dynamic import or tombstone write) block the actual local delete.
+  try {
+    const { recordDeletion } = await import('../sync/webdavSync');
+    await recordDeletion('tasks', id);
+  } catch { /* tombstone skipped; local delete proceeds */ }
   await db.tasks.delete(id);
 }
 
-/** Get today's tasks (excluding to-dos which persist across days). */
+/** Get today's tasks (excluding to-dos which persist across days AND weekly
+ *  instances, which are surfaced separately via their own weekKey grouping). */
 export async function getTodaysTasks(): Promise<Task[]> {
   const today = localDateKey();
-  return db.tasks.where('date').equals(today).filter(t => t.type !== 'todo').toArray();
+  return db.tasks.where('date').equals(today).filter(t => t.type !== 'todo' && !t.weekKey).toArray();
 }
 
 /** Get tasks for a specific date. */
@@ -1355,8 +1367,9 @@ export async function setTemplateSlots(id: string, slots: DaySlot[]): Promise<vo
     throw new Error('A daily preset must have at least one time slot');
   }
   const now = new Date().toISOString();
+  const { recordDeletions } = await import('../sync/webdavSync');
 
-  await db.transaction('rw', db.taskTemplates, db.tasks, async () => {
+  await db.transaction('rw', db.taskTemplates, db.tasks, db.settings, async () => {
     const template = await db.taskTemplates.get(id);
     if (!template) return;
     if (template.type !== 'preset') {
@@ -1373,13 +1386,18 @@ export async function setTemplateSlots(id: string, slots: DaySlot[]): Promise<vo
         .modify(t => { t.slot = oldFirst; t.updatedAt = now; });
     }
 
-    // Remove today's instances for slots that are being deactivated.
+    // Remove today's instances for slots that are being deactivated. Tombstone
+    // them so the deletion propagates via WebDAV (prevents resurrection on pull).
     const removedSlots = oldSlots.filter(s => !(clean as JournalTaskSlot[]).includes(s));
     if (removedSlots.length > 0) {
       const today = localDateKey();
-      await db.tasks.where('templateId').equals(id)
+      const removed = await db.tasks.where('templateId').equals(id)
         .filter(t => t.date === today && (t.slot !== undefined && removedSlots.includes(t.slot)))
-        .delete();
+        .toArray();
+      if (removed.length > 0) {
+        await recordDeletions(removed.map(t => ({ table: 'tasks', recordId: t.id })));
+        await db.tasks.bulkDelete(removed.map(t => t.id));
+      }
     }
 
     // Per-slot display order: keep existing slot orders; append newly selected
@@ -1447,7 +1465,12 @@ export async function reorderTemplate(id: string, slot: DaySlot, direction: 'up'
 
 /** Delete a template and all its task instances. Records tombstones for sync. */
 export async function deleteTaskTemplate(id: string): Promise<void> {
-  const { recordDeletions } = await import('../sync/webdavSync');
+  // Best-effort tombstone loading: the local delete must never be blocked by a
+  // stale dynamic import or a failed tombstone write in the sync module.
+  let recordDeletions: (d: { table: string; recordId: string }[]) => Promise<void> | undefined;
+  try {
+    ({ recordDeletions } = await import('../sync/webdavSync'));
+  } catch { /* tombstone module unavailable — proceed without */ }
   // Collect all task IDs that will be deleted so we can tombstone them
   const tasksToDelete = await db.tasks.where('templateId').equals(id).toArray();
   const deletions: { table: string; recordId: string }[] = [
@@ -1455,7 +1478,9 @@ export async function deleteTaskTemplate(id: string): Promise<void> {
     ...tasksToDelete.map(t => ({ table: 'tasks', recordId: t.id })),
   ];
   await db.transaction('rw', db.taskTemplates, db.tasks, db.settings, async () => {
-    await recordDeletions(deletions);
+    if (recordDeletions) {
+      try { await recordDeletions(deletions); } catch { /* tombstone best-effort */ }
+    }
     await db.taskTemplates.delete(id);
     await db.tasks.where('templateId').equals(id).delete();
   });
@@ -1526,51 +1551,83 @@ export async function ensureDailyPresetInstances(): Promise<void> {
 /**
  * Ensure this week's task instances exist for all active weekly templates.
  * For a template with weekFrequency=3, creates 3 task instances if <3 exist for this week.
+ * Runs inside a transaction for atomicity (prevents duplicate instances from
+ * concurrent calls), and trims excess instances if a template's frequency was
+ * reduced mid-week.
  */
 export async function ensureWeeklyTaskInstances(): Promise<void> {
   const weekKey = getWeekKey();
   const weeklyTemplates = await getTemplatesByType('weekly');
   if (weeklyTemplates.length === 0) return;
 
-  // Single query: get all this week's tasks that have a templateId
-  const weekTasks = await db.tasks
-    .where('weekKey').equals(weekKey)
-    .filter(t => !!t.templateId)
-    .toArray();
+  const { recordDeletions } = await import('../sync/webdavSync');
 
-  // Group by templateId
-  const countByTemplate = new Map<string, number>();
-  for (const t of weekTasks) {
-    countByTemplate.set(t.templateId!, (countByTemplate.get(t.templateId!) || 0) + 1);
-  }
+  await db.transaction('rw', db.tasks, db.settings, async () => {
+    // Single query: get all this week's tasks that have a templateId
+    const weekTasks = await db.tasks
+      .where('weekKey').equals(weekKey)
+      .filter(t => !!t.templateId)
+      .toArray();
 
-  // Create missing instances for each template
-  const toCreate: { id: string; text: string; date: string; done: boolean; createdAt: string; source: 'manual'; templateId: string; weekKey: string }[] = [];
-  const today = localDateKey();
-  const now = new Date().toISOString();
-
-  for (const template of weeklyTemplates) {
-    const frequency = template.weekFrequency ?? 1;
-    const existingCount = countByTemplate.get(template.id) || 0;
-    const missing = frequency - existingCount;
-
-    for (let i = 0; i < missing; i++) {
-      toCreate.push({
-        id: uuid(),
-        text: template.text,
-        date: today,
-        done: false,
-        createdAt: now,
-        source: 'manual',
-        templateId: template.id,
-        weekKey,
-      });
+    // Group by templateId
+    const byTemplate = new Map<string, Task[]>();
+    for (const t of weekTasks) {
+      const arr = byTemplate.get(t.templateId!);
+      if (arr) arr.push(t);
+      else byTemplate.set(t.templateId!, [t]);
     }
-  }
 
-  if (toCreate.length > 0) {
-    await db.tasks.bulkAdd(toCreate);
-  }
+    const today = localDateKey();
+    const now = new Date().toISOString();
+    const toCreate: { id: string; text: string; date: string; done: boolean; createdAt: string; source: 'manual'; templateId: string; weekKey: string }[] = [];
+    const toDelete: string[] = [];
+
+    for (const template of weeklyTemplates) {
+      const frequency = template.weekFrequency ?? 1;
+      const existing = byTemplate.get(template.id) ?? [];
+
+      // If the frequency was reduced (e.g. 3 → 1), trim the excess instances so
+      // the extra rows don't keep showing in the UI / counting toward completion.
+      // Delete undone instances first; fall back to newest if not enough undone.
+      if (existing.length > frequency) {
+        const excess = existing.length - frequency;
+        const undone = existing.filter(t => !t.done);
+        const targets = undone.slice(0, excess);
+        if (targets.length < excess) {
+          const used = new Set(targets.map(t => t.id));
+          const remaining = existing
+            .filter(t => !used.has(t.id))
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+          targets.push(...remaining.slice(0, excess - targets.length));
+        }
+        toDelete.push(...targets.map(t => t.id));
+      }
+
+      const missing = frequency - existing.length;
+      for (let i = 0; i < missing; i++) {
+        toCreate.push({
+          id: uuid(),
+          text: template.text,
+          date: today,
+          done: false,
+          createdAt: now,
+          source: 'manual',
+          templateId: template.id,
+          weekKey,
+        });
+      }
+    }
+
+    if (toDelete.length > 0) {
+      // Tombstone the trimmed instances so the reduction propagates via WebDAV
+      // (otherwise the next pull would resurrect them and cause delete/restore churn).
+      await recordDeletions(toDelete.map(id => ({ table: 'tasks', recordId: id })));
+      await db.tasks.bulkDelete(toDelete);
+    }
+    if (toCreate.length > 0) {
+      await db.tasks.bulkAdd(toCreate);
+    }
+  });
 }
 
 /**
@@ -1729,9 +1786,9 @@ export async function getTaskNudgeSummary(): Promise<string> {
   const parts: string[] = [];
   const today = localDateKey();
 
-  // 1. Undone daily tasks
+  // 1. Undone daily tasks (presets + custom; weekly instances are reported separately below)
   const dailyTasks = await getTodaysTasks();
-  const undoneDaily = dailyTasks.filter(t => !t.done && !t.templateId);
+  const undoneDaily = dailyTasks.filter(t => !t.done && !t.weekKey);
   if (undoneDaily.length > 0) {
     parts.push(`Undone today: ${undoneDaily.map(t => t.text).join(', ')}`);
   }
@@ -1816,7 +1873,12 @@ let syncMutex = false;
 export function triggerSync(): void {
   if (syncTimeout) clearTimeout(syncTimeout);
   syncTimeout = setTimeout(async () => {
-    if (syncMutex) return; // skip if a sync is already in progress
+    syncTimeout = null;
+    if (syncMutex) {
+      // A sync is already running — reschedule so these changes aren't lost.
+      triggerSync();
+      return;
+    }
     syncMutex = true;
     try {
       const { isSyncEnabled, performSync } = await import('../sync/webdavSync');

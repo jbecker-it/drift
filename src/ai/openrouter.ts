@@ -137,7 +137,12 @@ export async function chatComplete(
   }
 
   const json = await res.json();
-  return json.choices?.[0]?.message?.content || '';
+  const content = json.choices?.[0]?.message?.content || '';
+  // Strip any inline reasoning block (e.g. <thinking>…) from the non-streaming
+  // path too, so background jobs (tagging, context refresh) always receive clean
+  // text that JSON-parses reliably even if a reasoning model is selected.
+  const filter = createStreamingReasoningFilter();
+  return filter.push(content) + filter.finish();
 }
 
 // ─── Reasoning block filter (streaming-aware) ────────
@@ -234,8 +239,10 @@ export function createStreamingReasoningFilter() {
 
     finish(): string {
       finished = true;
-      // Release any remaining buffer (no more tags expected)
-      if (buffer.length > 0) {
+      // Release any remaining buffer (no more tags expected) — but drop an
+      // unterminated reasoning block (truncated by max_tokens or a dropped
+      // connection) so raw chain-of-thought never leaks into the reply.
+      if (buffer.length > 0 && !inTag) {
         textParts.push(buffer);
         buffer = '';
       }

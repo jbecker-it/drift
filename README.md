@@ -52,7 +52,7 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 **Pre-built releases** — no Node.js required:
 [GitHub Releases](https://github.com/jbecker-it/drift/releases)
 
-1. Download `drift-v0.6.0.zip` from the latest release
+1. Download `drift-v1.0.0.zip` from the latest release
 2. Unzip it
 3. Serve the `dist/` folder (e.g. `npx serve dist`, or deploy to any static host)
 
@@ -175,6 +175,18 @@ This project is licensed under the **MIT License**.
 ---
 
 ## 📋 Changelog
+
+### v1.0.0 — First Stable Release 🎉
+
+**🏁 Marking the jump to 1.0** after a full pre-release review and hardening pass across the whole codebase.
+
+- **WebDAV sync now runs automatically in the background** when configured: a periodic sync every 5 minutes while the app is open, plus an immediate sync whenever the tab becomes visible, on top of the existing event-driven debounced sync after data changes. All sync calls are guarded by a mutex and have network timeouts so a slow server can never block the UI.
+- **Deletions propagate reliably**: entry, task, and slot changes that remove records now write tombstones and push them, so deleted data can't resurrect from another device.
+- **Weekly tasks roll over and reset correctly**: weekly instances are created atomically (no cross-tab duplicates) and are trimmed — with tombstones — if you lower a task's weekly frequency mid-week.
+- **Task data now reaches the AI**: daily preset tasks are included in reflection and coach context, and reflection waits for tagging so an entry's own tasks are present in its reflection.
+- **Data-loss fixes in the editor**: tapping "Done" after the first save now flushes your edits, editing an entry no longer deletes extracted tasks before re-tagging, and draft recovery can't clobber what you're typing.
+- Hardened AI sub-system (response validation, reasoning-tag cleanup, offline model-cache fallback) and Settings/Onboarding reliability fixes.
+- 15 automated tests passing (task rollover, trimming, task→AI context, multi-slot presets).
 
 ### v0.6.0 — Multi-Slot Daily Presets
 

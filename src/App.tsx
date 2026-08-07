@@ -171,6 +171,45 @@ export default function App() {
     return () => { disposed = true; clearTimeout(timeout); };
   }, []);
 
+  // Background sync: run a full sync (pull + push) periodically and whenever the
+  // tab becomes visible, so remote changes are picked up and local changes are
+  // pushed without manual intervention. performSync is mutex-guarded, so
+  // overlapping runs (debounced triggerSync, periodic, visibility, manual) are safe.
+  useEffect(() => {
+    if (!ready) return;
+    let disposed = false;
+    const SYNC_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes while open
+
+    const runSync = async () => {
+      if (disposed) return;
+      try {
+        const { isSyncEnabled, performSync } = await import('./sync/webdavSync');
+        if (await isSyncEnabled()) {
+          if (disposed) return;
+          await performSync();
+        }
+      } catch {
+        // Silent — sync is best-effort (local-first app)
+      }
+    };
+
+    // First background sync fires shortly after startup (complements the initial pull).
+    const initialTimer = setTimeout(runSync, 5000);
+    const interval = setInterval(runSync, SYNC_INTERVAL_MS);
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') runSync();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      disposed = true;
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [ready]);
+
   // #37: Re-read the API key after onboarding completes to ensure consistency.
   const handleOnboardingComplete = useCallback(async () => {
     try {

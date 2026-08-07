@@ -85,11 +85,16 @@ export default function EntriesPage() {
 
   const handleReflect = async (entry: JournalEntry) => {
     const id = entry.id;
-    setEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: '...' } : e));
+    const prev = entry.aiReflection;
     try {
       const apiKey = await getApiKey();
       const model = await getModel();
-      if (!apiKey) return;
+      if (!apiKey) {
+        // Don't show a stuck '...' — leave the existing reflection intact.
+        return;
+      }
+
+      setEntries(prevEntries => prevEntries.map(e => e.id === id ? { ...e, aiReflection: '...' } : e));
 
       abortRef.current?.abort();
       abortRef.current = new AbortController();
@@ -98,12 +103,19 @@ export default function EntriesPage() {
       let result = '';
       for await (const chunk of streamChat(messages, { apiKey, model }, abortRef.current.signal, REQUEST_CONFIG.reflect)) {
         result += chunk;
-        setEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: result } : e));
+        setEntries(prevEntries => prevEntries.map(e => e.id === id ? { ...e, aiReflection: result } : e));
       }
       await updateEntry(id, { aiReflection: result });
     } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        setEntries(prev => prev.map(e => e.id === id ? { ...e, aiReflection: 'Error.' } : e));
+      if (err.name === 'AbortError') {
+        // Superseded by another reflection — restore whatever was there before.
+        setEntries(prevEntries => prevEntries.map(e => e.id === id ? { ...e, aiReflection: prev } : e));
+      } else {
+        // On error, preserve an existing reflection (never overwrite it with an
+        // error string); show an error only if there was nothing to preserve.
+        setEntries(prevEntries => prevEntries.map(e => e.id === id
+          ? { ...e, aiReflection: prev || 'Could not generate reflection.' }
+          : e));
       }
     }
   };

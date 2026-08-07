@@ -56,17 +56,18 @@ export default function CoachPage() {
   useEffect(scrollToBottom, [messages]);
 
   const startSession = async (mode: CoachMode, greeting?: string) => {
-    const sessionType = mode === 'brain_dump' ? 'dump'
-      : mode === 'morning_checkin' ? 'morning'
-      : mode === 'evening_winddown' ? 'evening'
-      : 'coach';
-    const session = await createSession(sessionType as any);
-    setSessionId(session.id);
     setCurrentMode(mode);
+    // Clear the session id so handleSend lazily creates a fresh session AFTER the
+    // API-key check (avoids persisting an empty session when no key is configured).
+    setSessionId(null);
     setMessages([]);
+    // Clear the message ref synchronously — messagesRef only updates via the
+    // effect after render, so without this the PREVIOUS session's history would
+    // be read by handleSend() and leak into the new session's AI context.
+    messagesRef.current = [];
 
     if (greeting) {
-      handleSend(greeting, mode, session.id);
+      handleSend(greeting, mode);
     }
   };
 
@@ -74,10 +75,25 @@ export default function CoachPage() {
     const messageText = text || input;
     if (!messageText.trim() || isStreaming) return;
 
+    // Snapshot the conversation history BEFORE mutating state. messagesRef only
+    // catches up via its render-effect, so reading it later (after the awaits)
+    // would already include the just-added user message and send it TWICE.
+    const history: Message[] = messagesRef.current.map(m => ({ role: m.role, content: m.content }));
+
     const userMsg: Message = { role: 'user', content: messageText };
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setIsStreaming(true);
+
+    // Check API key BEFORE creating/persisting a session or message, so we don't
+    // leave a dangling empty session in the DB when no key is configured.
+    const apiKey = await getApiKey();
+    const model = await getModel();
+    if (!apiKey) {
+      setIsStreaming(false);
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Please set your API key in Settings first.' }]);
+      return;
+    }
 
     // Save user message — use override if provided (avoids stale closure), else create session
     let currentSessionId = sessionIdOverride || sessionId;
@@ -91,16 +107,11 @@ export default function CoachPage() {
       currentSessionId = session.id;
       setSessionId(session.id);
     }
+
     await addMessageToSession(currentSessionId, 'user', messageText);
 
+    let assistantContent = '';
     try {
-      const apiKey = await getApiKey();
-      const model = await getModel();
-      if (!apiKey) {
-        setMessages(prev => [...prev, { role: 'assistant', content: 'Please set your API key in Settings first.' }]);
-        return;
-      }
-
       // Build context from recent entries + task nudge
       const [recentEntries, taskNudge] = await Promise.all([
         getRecentEntries(5),
@@ -113,16 +124,17 @@ export default function CoachPage() {
         recentContext += `\n\n[Task status]\n${taskNudge}`;
       }
 
-      const chatMessages: Message[] = messagesRef.current.map(m => ({ role: m.role, content: m.content }));
+      // Use the pre-mutation history snapshot (see note at top of handleSend) so
+      // the latest user message isn't sent twice.
       const apiMessages = buildCoachMessages(
         mode || currentMode,
         personality,
-        chatMessages,
+        history,
         messageText,
         recentContext || undefined,
       );
 
-      let assistantContent = '';
+      assistantContent = '';
       const assistantMsg: Message = { role: 'assistant', content: '' };
       setMessages(prev => [...prev, assistantMsg]);
 
@@ -150,6 +162,10 @@ export default function CoachPage() {
       const errorText = sanitizeError(err);
       if (errorText) {
         setMessages(prev => [...prev, { role: 'assistant', content: errorText }]);
+      } else if (assistantContent && currentSessionId) {
+        // User aborted mid-stream (or stream failed with no user-facing error) —
+        // persist whatever partial response was generated so it survives a reload.
+        await addMessageToSession(currentSessionId, 'assistant', assistantContent);
       }
     } finally {
       setIsStreaming(false);
