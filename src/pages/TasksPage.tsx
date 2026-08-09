@@ -8,6 +8,7 @@ import {
   ensureDailyPresetInstances, ensureWeeklyTaskInstances, getWeeklyTaskInstances,
   type Task, type TaskTemplate, type DaySlot, type JournalTaskSlot,
 } from '../db';
+import { onTaskRollover } from '../utils/taskRollover';
 
 type Tab = 'daily' | 'weekly' | 'todos' | 'custom';
 
@@ -89,6 +90,13 @@ export default function TasksPage() {
   }, []);
 
   useEffect(() => { loadAll(); }, [loadAll]);
+
+  // When a new day or week starts, re-read tasks so the reset instances show up
+  // even if this page is currently open (rather than only on mount / reload).
+  useEffect(
+    () => onTaskRollover(() => { loadAll(); }),
+    [loadAll],
+  );
 
   // Close move menu on outside click
   useEffect(() => {

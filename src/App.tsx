@@ -8,9 +8,11 @@ import DashboardPage from './pages/DashboardPage';
 import SettingsPage from './pages/SettingsPage';
 import Onboarding from './components/Onboarding';
 import UpdateBanner from './components/UpdateBanner';
+import SyncToast from './components/SyncToast';
 import { getApiKey } from './db';
 import { initNotifications } from './notifications';
 import { isSyncEnabled, pullFromServerSafe } from './sync/webdavSync';
+import { runTaskRollover, startTaskRollover, stopTaskRollover } from './utils/taskRollover';
 
 function Sidebar() {
   const [isOpen, setIsOpen] = useState(false);
@@ -197,8 +199,19 @@ export default function App() {
     const initialTimer = setTimeout(runSync, 5000);
     const interval = setInterval(runSync, SYNC_INTERVAL_MS);
 
+    // Task rollover: run once now (resets any tasks from a previous day/week),
+    // then at each local midnight (and Monday midnight for weekly tasks).
+    startTaskRollover();
+
     const onVisibility = () => {
-      if (document.visibilityState === 'visible') runSync();
+      if (document.visibilityState === 'visible') {
+        runSync();
+        // Catch a rollover that happened while the tab was hidden/backgrounded
+        // (the midnight timer may have been throttled or simply missed).
+        // visibilitychange fires on tab regain; no separate `focus` listener is
+        // needed (it would double-fire these on the same transition).
+        runTaskRollover().catch(() => {});
+      }
     };
     document.addEventListener('visibilitychange', onVisibility);
 
@@ -206,6 +219,7 @@ export default function App() {
       disposed = true;
       clearTimeout(initialTimer);
       clearInterval(interval);
+      stopTaskRollover();
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [ready]);
@@ -294,6 +308,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <UpdateBanner />
+      <SyncToast />
       <Layout>
         <Routes>
           <Route path="/" element={<JournalPage />} />

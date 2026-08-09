@@ -52,6 +52,32 @@ export interface SyncStatus {
 const SYNC_FILE = 'drift-data.json';
 // Sensitive keys excluded from export
 
+// ─── Sync event bus ─────────────────────────────────
+// Lets the UI show a transient notification whenever a sync starts, succeeds,
+// or fails, regardless of which caller triggered it (background timer, tab
+// visibility, report-on-demand triggerSync(), or the manual Settings button).
+export type SyncEvent =
+  | { type: 'start'; at: string }
+  | { type: 'success'; at: string; lastSync: string; conflicts?: number }
+  | { type: 'error'; at: string; message: string };
+
+type SyncListener = (e: SyncEvent) => void;
+
+const syncListeners = new Set<SyncListener>();
+
+/** Subscribe to sync lifecycle events. Returns an unsubscribe function. */
+export function onSyncEvent(listener: SyncListener): () => void {
+  syncListeners.add(listener);
+  return () => syncListeners.delete(listener);
+}
+
+/** Fire a sync event to all subscribers. */
+function emitSyncEvent(e: SyncEvent): void {
+  syncListeners.forEach(l => {
+    try { l(e); } catch { /* a bad listener must not break sync */ }
+  });
+}
+
 // Serialize tombstone reads/writes so concurrent deletions can't lose a
 // tombstone (read-modify-write is not atomic on the settings key-value store).
 let tombstoneQueue: Promise<unknown> = Promise.resolve();
@@ -531,6 +557,8 @@ export async function performSync(): Promise<SyncStatus> {
     return { ...status, syncing: false, error: 'A sync is already in progress.' };
   }
   syncInProgress = true;
+  // Notify listeners a sync run has started (for the UI notification bubble).
+  emitSyncEvent({ type: 'start', at: new Date().toISOString() });
   try {
     // Pull FIRST — detect and handle conflicts before overwriting remote
     const { conflicts, backedUp } = await pullFromServerSafe();
@@ -550,8 +578,12 @@ export async function performSync(): Promise<SyncStatus> {
         ? `${conflicts.length} conflict${conflicts.length > 1 ? 's' : ''} resolved — server version kept, local copies backed up to server`
         : `${conflicts.length} conflict${conflicts.length > 1 ? 's' : ''} resolved — server version kept; WARNING: backing up local copies FAILED, conflicting local edits were overwritten`;
     }
+    // Success (may carry conflict warnings). Treated as a success event so the
+    // UI can show a positive bubble; conflicts are surfaced via status.error.
+    emitSyncEvent({ type: 'success', at: new Date().toISOString(), lastSync: status.lastSync, conflicts: conflicts.length > 0 ? conflicts.length : undefined });
   } catch (err: any) {
     status.error = err.message || 'Sync failed';
+    emitSyncEvent({ type: 'error', at: new Date().toISOString(), message: status.error ?? 'Sync failed' });
   } finally {
     status.syncing = false;
     syncInProgress = false;

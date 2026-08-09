@@ -12,6 +12,7 @@ import { getReflectionPrompt, buildMessages, REQUEST_CONFIG } from '../ai/prompt
 import { tagEntry } from '../ai/tagging';
 import { shouldRefreshContext, refreshContextMemory, getContextMemoryPrompt } from '../ai/context';
 import { getModel, getApiKey } from '../db';
+import { onTaskRollover } from '../utils/taskRollover';
 
 const MOODS = [
   { value: 1, emoji: '😞', label: 'Struggling' },
@@ -97,6 +98,13 @@ export default function JournalPage() {
   }, []);
 
   useEffect(() => { loadEntries(); loadTasks(); }, [loadEntries, loadTasks]);
+
+  // When a new day or week starts, re-fetch the grouped tasks so the journal's
+  // today view reflects freshly reset daily/weekly instances.
+  useEffect(
+    () => onTaskRollover(() => { loadTasks(); }),
+    [loadTasks],
+  );
 
   // Recover any existing draft on mount
   useEffect(() => {

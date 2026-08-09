@@ -254,7 +254,7 @@ export const db = new DriftDB();
 // ─── Helpers ─────────────────────────────────────────
 
 /** Get a YYYY-MM-DD string in the user's local timezone (not UTC). */
-function localDateKey(date: Date = new Date()): string {
+export function localDateKey(date: Date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
@@ -290,6 +290,10 @@ export async function saveDraft(body: string): Promise<JournalEntry> {
     wordCount: body.split(/\s+/).filter(Boolean).length,
   };
   await db.entries.add(entry);
+  // Drafts sync too (they're in the entries payload and would reach the server
+  // on the periodic/visibility sync anyway); syncing now makes a draft available
+  // cross-device without waiting for the timer.
+  triggerSync();
   return entry;
 }
 
@@ -961,10 +965,12 @@ export async function saveEntryTags(tags: Omit<EntryTags, 'id'>): Promise<EntryT
     // Update existing tag record
     const updated: EntryTags = { ...existing, ...tags };
     await db.entryTags.put(updated);
+    triggerSync();
     return updated;
   }
   const record: EntryTags = { ...tags, id: uuid() };
   await db.entryTags.put(record);
+  triggerSync();
   return record;
 }
 
@@ -1008,6 +1014,7 @@ export async function addTask(text: string): Promise<Task> {
     createdAt: new Date().toISOString(),
   };
   await db.tasks.add(task);
+  triggerSync();
   return task;
 }
 
@@ -1018,6 +1025,7 @@ export async function toggleTask(id: string): Promise<void> {
     task.doneAt = task.done ? new Date().toISOString() : undefined;
     task.updatedAt = new Date().toISOString();
   });
+  triggerSync();
 }
 
 /** Delete a task. Records a tombstone for sync. */
@@ -1029,6 +1037,7 @@ export async function deleteTask(id: string): Promise<void> {
     await recordDeletion('tasks', id);
   } catch { /* tombstone skipped; local delete proceeds */ }
   await db.tasks.delete(id);
+  triggerSync();
 }
 
 /** Get today's tasks (excluding to-dos which persist across days AND weekly
@@ -1104,6 +1113,24 @@ export const DAY_SLOTS: DaySlot[] = ['morning', 'midday', 'afternoon', 'night'];
 export function getTemplateSlots(template: Pick<TaskTemplate, 'slots' | 'preset'>): JournalTaskSlot[] {
   if (template.slots && template.slots.length > 0) return [...new Set(template.slots)];
   return template.preset ? [template.preset] : [];
+}
+
+// ─── Deterministic instance IDs ──────────────────────
+// Generated preset/weekly task instances use template-derived, deterministic
+// IDs (NOT random UUIDs) so that every device creates the SAME primary key for
+// the same logical instance. This lets the WebDAV merge dedupe by id and keeps
+// synced devices convergent instead of accumulating duplicate instances.
+const DAILY_PREFIX = 'preset:';
+const WEEKLY_PREFIX = 'weekly:';
+
+/** Deterministic id for a daily preset instance (one per template × date × slot). */
+export function presetDailyId(templateId: string, date: string, slot: JournalTaskSlot): string {
+  return `${DAILY_PREFIX}${templateId}:${date}:${slot}`;
+}
+
+/** Deterministic id for a weekly instance (one per template × week × index). */
+export function presetWeeklyId(templateId: string, weekKey: string, index: number): string {
+  return `${WEEKLY_PREFIX}${templateId}:${weekKey}:${index}`;
 }
 
 /**
@@ -1333,6 +1360,7 @@ export async function createTaskTemplate(
     await db.taskTemplates.add(template);
   });
 
+  triggerSync();
   return template;
 }
 
@@ -1349,11 +1377,13 @@ export async function getTemplatesByType(type: TaskTemplate['type']): Promise<Ta
 /** Update a template. */
 export async function updateTaskTemplate(id: string, updates: Partial<TaskTemplate>): Promise<void> {
   await db.taskTemplates.update(id, { ...updates, updatedAt: new Date().toISOString() });
+  triggerSync();
 }
 
 /** Deactivate (soft-delete) a template. */
 export async function deactivateTemplate(id: string): Promise<void> {
   await db.taskTemplates.update(id, { active: false, updatedAt: new Date().toISOString() });
+  triggerSync();
 }
 
 /**
@@ -1424,6 +1454,8 @@ export async function setTemplateSlots(id: string, slots: DaySlot[]): Promise<vo
       updatedAt: now,
     });
   });
+  // Trigger sync so slot changes (and the tombstones for removed instances) push.
+  triggerSync();
 }
 
 /**
@@ -1461,6 +1493,7 @@ export async function reorderTemplate(id: string, slot: DaySlot, direction: 'up'
       updatedAt: now,
     })));
   });
+  triggerSync();
 }
 
 /** Delete a template and all its task instances. Records tombstones for sync. */
@@ -1484,6 +1517,8 @@ export async function deleteTaskTemplate(id: string): Promise<void> {
     await db.taskTemplates.delete(id);
     await db.tasks.where('templateId').equals(id).delete();
   });
+  // Push the tombstones so the deletion propagates to other devices.
+  triggerSync();
 }
 
 /**
@@ -1491,46 +1526,105 @@ export async function deleteTaskTemplate(id: string): Promise<void> {
  * Creates a Task per (template × slot) so multi-slot tasks can be checked
  * off independently in each time-of-day segment. Runs atomically so concurrent
  * callers (tasks page, journal view, notifications) can never duplicate an instance.
+ *
+ * Cross-device sync uses deterministic instance IDs (`preset:<templateId>:<date>:<slot>`)
+ * so every device generates the SAME record id for the same (template, date, slot).
+ * The WebDAV merge dedupes by primary key, so synced devices converge instead of
+ * accumulating duplicate instances (which device-specific random UUIDs would cause).
+ * Legacy instances created under the old random-UUID scheme are re-keyed to the
+ * deterministic id on the fly (idempotently), preserving their done state.
  */
-export async function ensureDailyPresetInstances(): Promise<void> {
-  const today = localDateKey();
+export async function ensureDailyPresetInstances(now: Date = new Date()): Promise<void> {
+  const today = localDateKey(now);
+  const { recordDeletions } = await import('../sync/webdavSync');
   // Read-check-add inside a single rw transaction: IndexedDB serializes rw
   // transactions over this scope, so overlapping calls cannot both insert.
-  await db.transaction('rw', db.taskTemplates, db.tasks, async () => {
+  await db.transaction('rw', db.taskTemplates, db.tasks, db.settings, async () => {
     const presets = await getTemplatesByType('preset');
     if (presets.length === 0) return;
     const presetsById = new Map(presets.map(p => [p.id, p]));
 
-    // Track which (template, slot) pairs already have an instance today.
-    // Legacy single-slot instances (no `slot` field) cover their template's first slot.
-    const covered = new Map<string, Set<string>>();
     const todayTasks = await db.tasks
       .where('date').equals(today)
       .filter(t => !!t.templateId)
       .toArray();
+
+    // Group today's template-linked tasks by logical key `${templateId}\0${slot}`.
+    // Slot defaults to the template's first slot for legacy single-slot instances.
+    const byKey = new Map<string, Task[]>();
     for (const t of todayTasks) {
       const tpl = t.templateId ? presetsById.get(t.templateId) : undefined;
-      if (t.slot) {
-        const set = covered.get(t.templateId!) ?? new Set<string>();
-        set.add(t.slot);
-        covered.set(t.templateId!, set);
-      } else if (tpl) {
-        const first = getTemplateSlots(tpl)[0];
-        if (first) {
-          const set = covered.get(t.templateId!) ?? new Set<string>();
-          set.add(first);
-          covered.set(t.templateId!, set);
-        }
-      }
+      if (!tpl) continue; // weekly instances (templateId set, not a preset) are handled elsewhere
+      const slot = t.slot ?? getTemplateSlots(tpl)[0];
+      if (!slot) continue;
+      const key = `${t.templateId!}\u0000${slot}`;
+      const arr = byKey.get(key);
+      if (arr) arr.push(t);
+      else byKey.set(key, [t]);
     }
 
-    const toCreate: { id: string; text: string; date: string; done: boolean; createdAt: string; source: 'manual'; templateId: string; slot: JournalTaskSlot }[] = [];
+    // For each key, converge the group down to a single row with the deterministic id,
+    // preserving the union of done state. Idempotent across repeated calls.
+    const toDelete: string[] = []; // old/duplicate ids removed
+    const toPut: Task[] = [];      // canonical row(s) written with deterministic id
+    for (const [key, group] of byKey) {
+      const [templateId, slot] = key.split('\u0000');
+      const expected = presetDailyId(templateId!, today, slot as JournalTaskSlot);
+
+      // Prefer keeping a row that already has the deterministic id.
+      let canonical = group.find(t => t.id === expected);
+      const others = group.filter(t => t.id !== expected);
+
+      if (canonical) {
+        // Merge any done state carried by duplicate rows into the canonical row,
+        // then drop the duplicates (tombstoning them so they don't resurrect on pull).
+        for (const other of others) {
+          if (!canonical.done && other.done) {
+            canonical = { ...canonical, done: true, doneAt: other.doneAt ?? canonical.doneAt, updatedAt: new Date().toISOString() };
+          } else if (canonical.done && !canonical.doneAt && other.doneAt) {
+            canonical = { ...canonical, doneAt: other.doneAt, updatedAt: new Date().toISOString() };
+          }
+          toDelete.push(other.id);
+        }
+        toPut.push(canonical);
+      } else if (others.length > 0) {
+        // No row has the deterministic id yet — re-key the "best" legacy row
+        // (prefer done, then newest) and merge done state from the rest.
+        const best = others
+          .slice()
+          .sort((a, b) => Number(!!b.done) - Number(!!a.done) || (b.createdAt || '').localeCompare(a.createdAt || ''));
+        let winner = best[0];
+        for (const o of best.slice(1)) {
+          if (!winner.done && o.done) {
+            winner = { ...winner, done: true, doneAt: o.doneAt ?? winner.doneAt, updatedAt: new Date().toISOString() };
+          } else if (winner.done && !winner.doneAt && o.doneAt) {
+            winner = { ...winner, doneAt: o.doneAt, updatedAt: new Date().toISOString() };
+          }
+          toDelete.push(o.id);
+        }
+        toDelete.push(winner.id);
+        toPut.push({ ...winner, id: expected });
+      }
+      // else: no instances for this key — the creation pass below handles it.
+    }
+
+    if (toDelete.length > 0) {
+      await recordDeletions(toDelete.map(id => ({ table: 'tasks', recordId: id })));
+      await db.tasks.bulkDelete(toDelete);
+    }
+    if (toPut.length > 0) {
+      await db.tasks.bulkPut(toPut);
+    }
+
+    // Create any slots that still have no instance today.
+    const coveredKeys = new Set(byKey.keys());
+    const toCreate: Task[] = [];
     for (const template of presets) {
-      const coveredSlots = covered.get(template.id) ?? new Set<string>();
       for (const slot of getTemplateSlots(template)) {
-        if (coveredSlots.has(slot)) continue;
+        const key = `${template.id}\u0000${slot}`;
+        if (coveredKeys.has(key)) continue;
         toCreate.push({
-          id: uuid(),
+          id: presetDailyId(template.id, today, slot),
           text: template.text,
           date: today,
           done: false,
@@ -1541,7 +1635,6 @@ export async function ensureDailyPresetInstances(): Promise<void> {
         });
       }
     }
-
     if (toCreate.length > 0) {
       await db.tasks.bulkAdd(toCreate);
     }
@@ -1554,9 +1647,14 @@ export async function ensureDailyPresetInstances(): Promise<void> {
  * Runs inside a transaction for atomicity (prevents duplicate instances from
  * concurrent calls), and trims excess instances if a template's frequency was
  * reduced mid-week.
+ *
+ * Instances use deterministic ids (`weekly:<templateId>:<weekKey>:<index>`) so every
+ * device creates the same primary keys → the WebDAV merge dedupes by id and devices
+ * stay convergent. Legacy random-UUID instances are re-keyed to this scheme on the
+ * fly (idempotently), preserving their done state.
  */
-export async function ensureWeeklyTaskInstances(): Promise<void> {
-  const weekKey = getWeekKey();
+export async function ensureWeeklyTaskInstances(now: Date = new Date()): Promise<void> {
+  const weekKey = getWeekKey(now);
   const weeklyTemplates = await getTemplatesByType('weekly');
   if (weeklyTemplates.length === 0) return;
 
@@ -1577,18 +1675,25 @@ export async function ensureWeeklyTaskInstances(): Promise<void> {
       else byTemplate.set(t.templateId!, [t]);
     }
 
-    const today = localDateKey();
-    const now = new Date().toISOString();
-    const toCreate: { id: string; text: string; date: string; done: boolean; createdAt: string; source: 'manual'; templateId: string; weekKey: string }[] = [];
-    const toDelete: string[] = [];
+    const today = localDateKey(now);
+    const nowIso = now.toISOString();
+    const toDelete: string[] = []; // old ids removed (trimmed or re-keyed)
+    const toPut: Task[] = [];      // records re-keyed to deterministic ids
 
     for (const template of weeklyTemplates) {
       const frequency = template.weekFrequency ?? 1;
-      const existing = byTemplate.get(template.id) ?? [];
+      const raw = byTemplate.get(template.id) ?? [];
+
+      // Stable ordering so index assignment is reproducible across devices:
+      // sort by createdAt then id (both comparable strings).
+      const existing = [...raw].sort(
+        (a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id)
+      );
 
       // If the frequency was reduced (e.g. 3 → 1), trim the excess instances so
       // the extra rows don't keep showing in the UI / counting toward completion.
       // Delete undone instances first; fall back to newest if not enough undone.
+      let kept = existing;
       if (existing.length > frequency) {
         const excess = existing.length - frequency;
         const undone = existing.filter(t => !t.done);
@@ -1600,17 +1705,29 @@ export async function ensureWeeklyTaskInstances(): Promise<void> {
             .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
           targets.push(...remaining.slice(0, excess - targets.length));
         }
-        toDelete.push(...targets.map(t => t.id));
+        const doomed = new Set(targets.map(t => t.id));
+        toDelete.push(...doomed);
+        kept = existing.filter(t => !doomed.has(t.id));
       }
 
-      const missing = frequency - existing.length;
+      // Re-key survivors to sequential deterministic indices, preserving done state.
+      kept.forEach((t, i) => {
+        const newId = presetWeeklyId(template.id, weekKey, i);
+        if (t.id !== newId) {
+          toDelete.push(t.id);
+          toPut.push({ ...t, id: newId });
+        }
+      });
+
+      // Materialize any missing instances to reach `frequency`.
+      const missing = frequency - kept.length;
       for (let i = 0; i < missing; i++) {
-        toCreate.push({
-          id: uuid(),
+        toPut.push({
+          id: presetWeeklyId(template.id, weekKey, kept.length + i),
           text: template.text,
           date: today,
           done: false,
-          createdAt: now,
+          createdAt: nowIso,
           source: 'manual',
           templateId: template.id,
           weekKey,
@@ -1619,13 +1736,13 @@ export async function ensureWeeklyTaskInstances(): Promise<void> {
     }
 
     if (toDelete.length > 0) {
-      // Tombstone the trimmed instances so the reduction propagates via WebDAV
-      // (otherwise the next pull would resurrect them and cause delete/restore churn).
+      // Tombstone the removed/re-keyed old ids so the change propagates via WebDAV
+      // (prevents resurrection of stale ids on pull).
       await recordDeletions(toDelete.map(id => ({ table: 'tasks', recordId: id })));
       await db.tasks.bulkDelete(toDelete);
     }
-    if (toCreate.length > 0) {
-      await db.tasks.bulkAdd(toCreate);
+    if (toPut.length > 0) {
+      await db.tasks.bulkPut(toPut);
     }
   });
 }
@@ -1727,6 +1844,7 @@ export async function addTodo(text: string, dueDate?: string): Promise<Task> {
     dueDate,
   };
   await db.tasks.add(task);
+  triggerSync();
   return task;
 }
 
@@ -1851,6 +1969,7 @@ export async function getContextMemory(): Promise<ContextMemory | null> {
 /** Save/update the context memory profile. */
 export async function saveContextMemory(memory: Omit<ContextMemory, 'id'>): Promise<void> {
   await db.contextMemory.put({ ...memory, id: 'primary' });
+  triggerSync();
 }
 
 /** Get the last N non-draft entries for context building. */
@@ -1950,4 +2069,7 @@ export async function extractTasksFromTags(entry: JournalEntry): Promise<void> {
       });
     }
   }
+  // Harmless (debounced + idempotent) — makes task extraction robust to
+  // any call order relative to saveEntryTags' own sync trigger.
+  triggerSync();
 }
