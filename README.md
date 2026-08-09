@@ -12,8 +12,8 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 - 🧠 **Context Memory** — Drift builds a rolling profile of you (patterns, key facts, open loops, recent wins, mood trend) that makes AI reflections feel personal instead of generic. Refreshed every ~5 entries by the background model.
 - 🤖 **AI Reflections** — Get personalized reflections powered by your context memory, today's tasks, recent entry summaries, and current entry — all in one prompt.
 - ✅ **Daily Tasks** — Add tasks for today, tick them off while journaling. Tasks are also auto-extracted from your entries by the background model.
-- 📋 **Task Presets** — Create recurring daily tasks for morning, midday, afternoon, and night. **One task can span multiple time slots** (e.g. "drink water" under Morning 🌅 + Afternoon 🌤️ + Night 🌙), each checked off independently — no more duplicate entries. Toggle a task's segments via the slot menu and reorder each segment independently.
-- 📆 **Weekly Tasks** — Set tasks that repeat weekly with configurable frequency (e.g., "exercise 3×/week"). Track completions across the running week with progress dots.
+- 📋 **Task Presets** — Create recurring daily tasks for morning, midday, afternoon, and night. **One task can span multiple time slots** (e.g. "drink water" under Morning 🌅 + Afternoon 🌤️ + Night 🌙), each checked off independently — no more duplicate entries. Toggle a task's segments via the slot menu and reorder each segment independently. **Daily presets reset automatically at local 00:00** — even if the app is left open overnight.
+- 📆 **Weekly Tasks** — Set tasks that repeat weekly with configurable frequency (e.g., "exercise 3×/week"). Track completions across the running week with progress dots. **Weekly tasks roll over and reset automatically on Monday 00:00.**
 - 📝 **To-Dos** — Persistent tasks that don't expire daily. Set optional due dates with overdue/today/this-week visual urgency cues.
 - 🔔 **Smart Notifications** — Configurable reminders to journal and check tasks. **Per-part-of-day task reminders** fire at the end of morning, midday, afternoon, and night slots. Evening reminders only fire if you haven't journaled. General task reminders cover custom tasks and to-dos.
 - 🧠 **AI Nudges** — Reflection and coach chat now include task context: undone daily tasks, overdue to-dos, and stalling weekly tasks get gentle, natural reminders woven into the AI response.
@@ -52,7 +52,7 @@ Drift is a web-based journaling tool built for people with ADHD who want a simpl
 **Pre-built releases** — no Node.js required:
 [GitHub Releases](https://github.com/jbecker-it/drift/releases)
 
-1. Download `drift-v1.0.0.zip` from the latest release
+1. Download `drift-v1.0.1.zip` from the latest release
 2. Unzip it
 3. Serve the `dist/` folder (e.g. `npx serve dist`, or deploy to any static host)
 
@@ -175,6 +175,23 @@ This project is licensed under the **MIT License**.
 ---
 
 ## 📋 Changelog
+
+### v1.0.1 — Automatic Daily & Weekly Task Reset
+
+**⏰ Tasks now reset on their own — while the app is open.**
+
+- **Daily preset tasks reset automatically at local 00:00** (previously they only refreshed when a page mounted or the app reloaded). If Drift stays open past midnight, the new day's tasks appear on their own.
+- **Weekly tasks reset on Monday 00:00** — instances for the new ISO week are created, undone, exactly at the weekly boundary.
+- New scheduled rollover (`src/utils/taskRollover.ts`) fires at the next local midnight (DST-safe) and re-arms each night; a tab re-focus catch-up covers cases where the timer was throttled in the background.
+- Open Tasks / Journal pages refresh in place when a rollover happens — no reload needed.
+- Instance materialization now accepts an injectable "now" date, so resets target the exact boundary.
+- 18 automated tests passing (3 new rollover tests simulate midnight and Monday boundaries, verifying fresh undone instances while prior-day/week history is preserved).
+
+**Also bundled (WebDAV sync hardening)**
+- **SyncToast** — transient UI bubble for sync start / success / error.
+- **Tombstone deletions** on task and template mutations so removed records can't resurrect from another device.
+- **Automatic `triggerSync`** after task & template changes.
+- Stricter task sorting / reorder stability.
 
 ### v1.0.0 — First Stable Release 🎉
 
