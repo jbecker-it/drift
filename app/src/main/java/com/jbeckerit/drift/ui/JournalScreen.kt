@@ -133,6 +133,7 @@ fun JournalScreen(container: AppContainer) {
                     modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp),
                     label = { Text("What is on your mind?") },
                     minLines = 7,
+                    enabled = !reflecting,
                 )
                 Text("How does it feel?", modifier = Modifier.padding(top = 14.dp, bottom = 6.dp), style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -143,9 +144,12 @@ fun JournalScreen(container: AppContainer) {
                 Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = {
+                            val id = entryId
+                            val text = body
+                            val selectedMood = mood
                             scope.launch {
-                                runCatching { repository.saveEntry(entryId, body, mood) }
-                                    .onSuccess { persistedBody = body; persistedMood = mood; status = "Saved locally"; error = null }
+                                runCatching { repository.saveEntry(id, text, selectedMood) }
+                                    .onSuccess { persistedBody = text; persistedMood = selectedMood; status = "Saved locally"; error = null }
                                     .onFailure { error = it.message }
                             }
                         },
@@ -153,12 +157,15 @@ fun JournalScreen(container: AppContainer) {
                     ) { Text("Save entry") }
                     TextButton(
                         onClick = {
+                            val id = entryId
+                            val text = body
+                            val selectedMood = mood
                             scope.launch {
                                 reflecting = true; error = null; reflection = ""
                                 runCatching {
-                                    val saved = repository.saveEntry(entryId, body, mood)
+                                    val saved = repository.saveEntry(id, text, selectedMood)
                                     container.ai.reflect(saved) { chunk -> withContext(Dispatchers.Main.immediate) { reflection += chunk } }
-                                }.onSuccess { persistedBody = body; persistedMood = mood; status = "Saved with reflection" }.onFailure { error = it.message }
+                                }.onSuccess { persistedBody = text; persistedMood = selectedMood; status = "Saved with reflection" }.onFailure { error = it.message }
                                 reflecting = false
                             }
                         },
