@@ -2,6 +2,7 @@ package com.jbeckerit.drift.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -76,7 +77,7 @@ fun ScreenTitle(title: String, subtitle: String, action: (@Composable () -> Unit
 }
 
 @Composable
-fun SectionCard(modifier: Modifier = Modifier, content: @Composable Column.() -> Unit) {
+fun SectionCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Card(modifier = modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp), content = content) }
 }
 
