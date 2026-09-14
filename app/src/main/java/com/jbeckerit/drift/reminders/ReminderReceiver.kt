@@ -56,9 +56,13 @@ class ReminderReceiver : BroadcastReceiver() {
 
     private suspend fun taskMessage(app: DriftApplication): String? {
         val daily = app.container.repository.unfinishedToday()
-        val todos = app.container.repository.unfinishedTodos()
+        val todos = app.container.repository.dueTodos()
         val count = daily.size + todos.size
-        return if (count == 0) null else "$count unfinished ${if (count == 1) "task" else "tasks"} are waiting. Pick one small next step."
+        return when (count) {
+            0 -> null
+            1 -> "One task is ready when you are. Pick the smallest next step."
+            else -> "$count tasks are due or still on today’s list. Choose just one."
+        }
     }
 
     private fun notify(context: Context, kind: String, body: String) {

@@ -206,7 +206,7 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
                     Row(modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.medium), horizontalArrangement = Arrangement.SpaceBetween) {
                         Column(Modifier.weight(1f)) {
                             Text("Find patterns after saving")
-                            Text("Sends each new saved entry to your configured provider.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Sends each new saved entry to your configured provider, then refreshes a small context after the first insight and every five after that.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Switch(checked = automaticInsights, onCheckedChange = { automaticInsights = it })
                     }

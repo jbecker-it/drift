@@ -92,7 +92,7 @@ fun JournalScreen(
             }
         }
         item {
-            Text("Recent entries", modifier = Modifier.padding(top = DriftSpace.small), style = MaterialTheme.typography.titleLarge)
+            Text("Your entries", modifier = Modifier.padding(top = DriftSpace.small), style = MaterialTheme.typography.titleLarge)
         }
         if (entries.isEmpty()) {
             item { EmptyState("Your saved entries will appear here. Drafts stay with you until you decide they are ready.") }
@@ -191,7 +191,12 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
                     persistedBody = body
                     persistedMood = mood
                     if (appSettings.ai.automaticInsights && appSettings.ai.key.isNotBlank()) {
-                        container.appScope.launch { runCatching { container.ai.analyzeEntry(saved) } }
+                        container.appScope.launch {
+                            runCatching {
+                                container.ai.analyzeEntry(saved)
+                                container.ai.refreshContextIfNeeded()
+                            }
+                        }
                     }
                     onDone()
                 }

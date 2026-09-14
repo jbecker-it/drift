@@ -66,15 +66,17 @@ fun TodayScreen(
         val templateOrder = templates.associate { it.id to it.sortOrder }
         today.sortedWith(compareBy<Task> { it.done }.thenBy { templateOrder[it.templateId] ?: Int.MAX_VALUE }.thenBy { it.createdAt })
     }
-    val visibleTasks = remember(orderedToday, todos, currentSlot) {
+    val todayKey = LocalDate.now().toString()
+    val dueTodos = remember(todos, todayKey) { todos.filter { it.dueDate != null && it.dueDate <= todayKey } }
+    val visibleTasks = remember(orderedToday, dueTodos, currentSlot) {
         val currentRoutine = orderedToday.filter { !it.done && it.slot == currentSlot }
         val oneOff = orderedToday.filter { !it.done && it.slot == null }
-        val dueTodos = todos.filter { !it.done && (it.dueDate == null || it.dueDate <= LocalDate.now().toString()) }
-        (currentRoutine + oneOff + dueTodos).distinctBy(Task::id).take(3)
+        (currentRoutine + oneOff + dueTodos.filterNot(Task::done)).distinctBy(Task::id).take(3)
     }
-    val allActionable = remember(today, todos) { (today + todos).filterNot { it.done } }
-    val completed = remember(today, todos) { (today + todos).count { it.done } }
-    val total = today.size + todos.size
+    val todayWork = remember(orderedToday, dueTodos) { orderedToday + dueTodos }
+    val allActionable = remember(todayWork) { todayWork.filterNot(Task::done) }
+    val completed = remember(todayWork) { todayWork.count(Task::done) }
+    val total = todayWork.size
     val hasWrittenToday = remember(entries) {
         val localToday = LocalDate.now()
         entries.any { entry -> Instant.ofEpochMilli(entry.createdAt).atZone(java.time.ZoneId.systemDefault()).toLocalDate() == localToday }

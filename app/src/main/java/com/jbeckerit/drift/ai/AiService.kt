@@ -146,6 +146,13 @@ class AiService(private val settings: SecureSettings, private val repository: Dr
         return memory
     }
 
+    /** Keeps the optional rolling profile current without doing a request per entry. */
+    suspend fun refreshContextIfNeeded(): ContextMemory? {
+        val existing = repository.contextMemory()
+        if (existing != null && repository.entryTagCountSince(existing.lastUpdated) < 5) return existing
+        return refreshContextMemory()
+    }
+
     suspend fun topicSuggestions(): List<String> {
         val ai = requireAi()
         val summaries = repository.recentTaggedSummaries(8)

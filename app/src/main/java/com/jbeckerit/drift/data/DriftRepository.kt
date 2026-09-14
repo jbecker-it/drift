@@ -119,6 +119,7 @@ class DriftRepository(private val database: DriftDatabase, private val afterChan
         return tags.takeIf { dao.entry(id)?.revision == it.entryRevision }
     }
     suspend fun recentEntryTags(limit: Int = 14) = dao.recentEntryTags(limit)
+    suspend fun entryTagCountSince(since: Long): Int = dao.entryTagCountSince(since)
     suspend fun taggingPending(id: String, revision: Long): Boolean =
         (dao.setTaggingState(id, revision, "pending", null, System.currentTimeMillis()) > 0).also { if (it) afterChange() }
 
@@ -392,6 +393,10 @@ class DriftRepository(private val database: DriftDatabase, private val afterChan
         return dao.daily(date).filter { !it.done && (slot == null || it.slot == slot) }
     }
     suspend fun unfinishedTodos(): List<Task> = dao.observeTodos().first().filterNot { it.done }
+    suspend fun dueTodos(): List<Task> {
+        val today = TaskKeys.today()
+        return dao.observeTodos().first().filter { !it.done && it.dueDate != null && it.dueDate <= today }
+    }
     suspend fun hasEntryToday(): Boolean {
         val start = LocalDate.now().atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
         return dao.recentEntries(50).any { it.createdAt >= start }

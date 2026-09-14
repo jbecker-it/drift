@@ -59,6 +59,7 @@ interface DriftDao {
 
     @Query("SELECT * FROM entry_tags WHERE entryId=:entryId AND deletedAt IS NULL") suspend fun entryTags(entryId: String): EntryTags?
     @Query("SELECT * FROM entry_tags WHERE deletedAt IS NULL ORDER BY taggedAt DESC LIMIT :limit") suspend fun recentEntryTags(limit: Int): List<EntryTags>
+    @Query("SELECT COUNT(*) FROM entry_tags WHERE deletedAt IS NULL AND taggedAt > :since") suspend fun entryTagCountSince(since: Long): Int
     @Upsert suspend fun upsertEntryTags(tags: EntryTags)
     @Query("UPDATE entry_tags SET deletedAt=:now, updatedAt=:now WHERE entryId=:entryId AND deletedAt IS NULL") suspend fun deleteEntryTags(entryId: String, now: Long)
 
