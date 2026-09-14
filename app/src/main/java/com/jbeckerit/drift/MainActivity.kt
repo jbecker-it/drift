@@ -4,6 +4,9 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -80,6 +83,10 @@ private fun DriftApp(
             navController = nav,
             startDestination = firstDestination,
             modifier = Modifier.padding(padding),
+            enterTransition = { fadeIn(animationSpec = tween(180)) },
+            exitTransition = { fadeOut(animationSpec = tween(120)) },
+            popEnterTransition = { fadeIn(animationSpec = tween(160)) },
+            popExitTransition = { fadeOut(animationSpec = tween(100)) },
         ) {
             composable("today") {
                 TodayScreen(

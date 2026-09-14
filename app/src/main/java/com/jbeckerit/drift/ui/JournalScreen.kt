@@ -4,6 +4,7 @@ package com.jbeckerit.drift.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,12 +18,13 @@ import androidx.compose.foundation.layout.weight
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -126,6 +128,7 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
     var suggesting by rememberSaveable(entryId) { mutableStateOf(false) }
     var showSuggestions by rememberSaveable(entryId) { mutableStateOf(false) }
     var confirmDelete by rememberSaveable(entryId) { mutableStateOf(false) }
+    var aiMenuOpen by rememberSaveable(entryId) { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { container.nano.refresh() }
 
@@ -197,6 +200,85 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
         }
     }
 
+    fun reflectWithCloud() {
+        if (body.isBlank()) {
+            error = "Write a little first, then Drift can reflect it back to you."
+            return
+        }
+        val textAtRequest = body
+        val moodAtRequest = mood
+        val idAtRequest = actualId
+        scope.launch {
+            reflecting = true
+            error = null
+            reflection = ""
+            runCatching {
+                val saved = repository.saveEntry(idAtRequest, textAtRequest, moodAtRequest)
+                container.ai.reflect(saved) { chunk ->
+                    withContext(Dispatchers.Main.immediate) {
+                        if (body == textAtRequest) reflection += chunk
+                    }
+                }
+            }.onSuccess {
+                persistedBody = textAtRequest
+                persistedMood = moodAtRequest
+                status = "Reflection saved"
+            }.onFailure { error = it.message ?: "Drift could not create a reflection." }
+            reflecting = false
+        }
+    }
+
+    fun reflectPrivately() {
+        if (body.isBlank()) {
+            error = "Write a little first, then Drift can reflect it back to you."
+            return
+        }
+        val textAtRequest = body
+        val moodAtRequest = mood
+        val idAtRequest = actualId
+        scope.launch {
+            reflecting = true
+            error = null
+            reflection = ""
+            runCatching {
+                val saved = repository.saveEntry(idAtRequest, textAtRequest, moodAtRequest)
+                val answer = container.nano.reflect(saved.body)
+                repository.storeReflection(saved.id, saved.revision, answer)
+                answer
+            }.onSuccess { answer ->
+                persistedBody = textAtRequest
+                persistedMood = moodAtRequest
+                if (body == textAtRequest) reflection = answer
+                status = "Offline reflection saved"
+            }.onFailure { error = it.message ?: "Drift could not create an offline reflection." }
+            reflecting = false
+        }
+    }
+
+    fun findPatterns() {
+        if (body.isBlank()) {
+            error = "Write a little first, then Drift can find grounded patterns."
+            return
+        }
+        val textAtRequest = body
+        val moodAtRequest = mood
+        val idAtRequest = actualId
+        scope.launch {
+            analyzing = true
+            error = null
+            runCatching {
+                val saved = repository.saveEntry(idAtRequest, textAtRequest, moodAtRequest)
+                saved to container.ai.analyzeEntry(saved)
+            }.onSuccess { (_, insight) ->
+                persistedBody = textAtRequest
+                persistedMood = moodAtRequest
+                tagData = insight
+                status = if (insight.mentions.tasksOpen.isEmpty()) "Patterns saved" else "Patterns saved · clear unfinished tasks added"
+            }.onFailure { error = it.message ?: "Drift could not find patterns in this entry." }
+            analyzing = false
+        }
+    }
+
     BackHandler(onBack = ::closeEditor)
     Column(Modifier.fillMaxSize().imePadding()) {
         TopAppBar(
@@ -216,14 +298,6 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
                     IconButton(onClick = { confirmDelete = true }, enabled = ready && !saving && !reflecting && !analyzing) {
                         Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete journal entry")
                     }
-                }
-                TextButton(onClick = ::saveAndClose, enabled = ready && !saving && !reflecting && !analyzing) {
-                    if (saving) {
-                        CircularProgressIndicator(modifier = Modifier.padding(end = DriftSpace.xSmall), strokeWidth = 2.dp)
-                    } else {
-                        Icon(Icons.Rounded.Check, contentDescription = null)
-                    }
-                    Text("Done", modifier = Modifier.padding(start = DriftSpace.xSmall))
                 }
             },
         )
@@ -256,47 +330,48 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
                     }
                 }
             }
+            val hasCloudAi = appSettings.ai.key.isNotBlank()
+            val hasPrivateAi = nanoAvailability is NanoAvailability.Ready
             Row(horizontalArrangement = Arrangement.spacedBy(DriftSpace.small), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(
-                    onClick = {
-                        if (body.isBlank()) {
-                            error = "Write a little first, then Drift can reflect it back to you."
-                            return@OutlinedButton
+                if (hasCloudAi || hasPrivateAi) {
+                    OutlinedButton(
+                        onClick = if (hasPrivateAi) ::reflectPrivately else ::reflectWithCloud,
+                        enabled = ready && !saving && !reflecting && !analyzing,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        if (reflecting) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Text("Reflecting", modifier = Modifier.padding(start = DriftSpace.small))
+                        } else {
+                            Icon(Icons.Rounded.AutoAwesome, contentDescription = null)
+                            Text(if (hasPrivateAi) "Reflect privately" else "Reflect", modifier = Modifier.padding(start = DriftSpace.small))
                         }
-                        val textAtRequest = body
-                        val moodAtRequest = mood
-                        val idAtRequest = actualId
-                        scope.launch {
-                            reflecting = true
-                            error = null
-                            reflection = ""
-                            runCatching {
-                                val saved = repository.saveEntry(idAtRequest, textAtRequest, moodAtRequest)
-                                container.ai.reflect(saved) { chunk ->
-                                    withContext(Dispatchers.Main.immediate) {
-                                        if (body == textAtRequest) reflection += chunk
-                                    }
-                                }
-                            }.onSuccess {
-                                persistedBody = textAtRequest
-                                persistedMood = moodAtRequest
-                                status = "Reflection saved"
-                            }.onFailure { error = it.message ?: "Drift could not create a reflection." }
-                            reflecting = false
-                        }
-                    },
-                    enabled = ready && !reflecting && !analyzing,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    if (reflecting) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Text("Reflecting", modifier = Modifier.padding(start = DriftSpace.small))
-                    } else {
-                        Icon(Icons.Rounded.AutoAwesome, contentDescription = null)
-                        Text("Reflect with AI", modifier = Modifier.padding(start = DriftSpace.small))
                     }
                 }
-                Button(onClick = ::saveAndClose, enabled = ready && !saving && !reflecting && !analyzing, modifier = Modifier.weight(1f)) { Text("Save entry") }
+                Button(
+                    onClick = ::saveAndClose,
+                    enabled = ready && !saving && !reflecting && !analyzing,
+                    modifier = if (hasCloudAi || hasPrivateAi) Modifier.weight(1f) else Modifier.fillMaxWidth(),
+                ) { Text(if (saving) "Saving…" else "Save entry") }
+            }
+            if (hasCloudAi) {
+                Box {
+                    TextButton(onClick = { aiMenuOpen = true }, enabled = ready && !saving && !reflecting && !analyzing) {
+                        Text(if (analyzing) "Finding patterns…" else "AI options")
+                    }
+                    DropdownMenu(expanded = aiMenuOpen, onDismissRequest = { aiMenuOpen = false }) {
+                        if (hasPrivateAi) {
+                            DropdownMenuItem(
+                                text = { Text("Reflect with cloud AI") },
+                                onClick = { aiMenuOpen = false; reflectWithCloud() },
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Find patterns") },
+                            onClick = { aiMenuOpen = false; findPatterns() },
+                        )
+                    }
+                }
             }
             if (body.isBlank() && appSettings.ai.key.isNotBlank()) {
                 TextButton(
@@ -332,77 +407,6 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
                             },
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text(suggestion, modifier = Modifier.fillMaxWidth()) }
-                    }
-                }
-            }
-            if (nanoAvailability is NanoAvailability.Ready) {
-                TextButton(
-                    onClick = {
-                        if (body.isBlank()) {
-                            error = "Write a little first, then Drift can reflect it back to you."
-                            return@TextButton
-                        }
-                        val textAtRequest = body
-                        val moodAtRequest = mood
-                        val idAtRequest = actualId
-                        scope.launch {
-                            reflecting = true
-                            error = null
-                            reflection = ""
-                            runCatching {
-                                val saved = repository.saveEntry(idAtRequest, textAtRequest, moodAtRequest)
-                                val answer = container.nano.reflect(saved.body)
-                                repository.storeReflection(saved.id, saved.revision, answer)
-                                answer
-                            }.onSuccess { answer ->
-                                persistedBody = textAtRequest
-                                persistedMood = moodAtRequest
-                                if (body == textAtRequest) reflection = answer
-                                status = "Offline reflection saved"
-                            }.onFailure { error = it.message ?: "Drift could not create an offline reflection." }
-                            reflecting = false
-                        }
-                    },
-                    enabled = ready && !reflecting && !analyzing,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(Icons.Rounded.AutoAwesome, contentDescription = null)
-                    Text("Reflect privately on this phone", modifier = Modifier.padding(start = DriftSpace.small))
-                }
-            }
-            if (appSettings.ai.key.isNotBlank()) {
-                TextButton(
-                    onClick = {
-                        if (body.isBlank()) {
-                            error = "Write a little first, then Drift can find grounded patterns."
-                            return@TextButton
-                        }
-                        val textAtRequest = body
-                        val moodAtRequest = mood
-                        val idAtRequest = actualId
-                        scope.launch {
-                            analyzing = true
-                            error = null
-                            runCatching {
-                                val saved = repository.saveEntry(idAtRequest, textAtRequest, moodAtRequest)
-                                saved to container.ai.analyzeEntry(saved)
-                            }.onSuccess { (_, insight) ->
-                                persistedBody = textAtRequest
-                                persistedMood = moodAtRequest
-                                tagData = insight
-                                status = if (insight.mentions.tasksOpen.isEmpty()) "Patterns saved" else "Patterns saved · clear unfinished tasks added"
-                            }.onFailure { error = it.message ?: "Drift could not find patterns in this entry." }
-                            analyzing = false
-                        }
-                    },
-                    enabled = ready && !reflecting && !analyzing,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    if (analyzing) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Text("Finding patterns", modifier = Modifier.padding(start = DriftSpace.small))
-                    } else {
-                        Text("Find patterns", modifier = Modifier.padding(start = DriftSpace.small))
                     }
                 }
             }
