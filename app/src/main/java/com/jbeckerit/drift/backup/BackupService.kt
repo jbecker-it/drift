@@ -185,7 +185,7 @@ private data class BackupPayload(
     }
 }
 
-private fun encrypt(plaintext: ByteArray, password: CharArray): ByteArray {
+internal fun encrypt(plaintext: ByteArray, password: CharArray): ByteArray {
     val salt = ByteArray(SALT_BYTES).also(SecureRandom()::nextBytes)
     val iv = ByteArray(IV_BYTES).also(SecureRandom()::nextBytes)
     val keyBytes = deriveKey(password, salt)
@@ -205,7 +205,7 @@ private fun encrypt(plaintext: ByteArray, password: CharArray): ByteArray {
     }
 }
 
-private fun decrypt(bytes: ByteArray, password: CharArray): ByteArray {
+internal fun decrypt(bytes: ByteArray, password: CharArray): ByteArray {
     require(bytes.size > MAGIC.size + 1 + SALT_BYTES + IV_BYTES + 16) { "This backup is incomplete." }
     val input = ByteBuffer.wrap(bytes)
     val magic = ByteArray(MAGIC.size).also(input::get)
