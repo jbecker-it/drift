@@ -19,4 +19,4 @@ jobs:
       - uses: android-actions/setup-android@v3
       - run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew --no-daemon :app:compileDebugKotlin --stacktrace --info
+      - run: ./gradlew --no-daemon :app:compileDebugKotlin -x :app:kaptGenerateStubsDebugKotlin -x :app:kaptDebugKotlin --stacktrace
