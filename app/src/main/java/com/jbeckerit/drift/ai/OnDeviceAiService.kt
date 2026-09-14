@@ -58,7 +58,12 @@ class OnDeviceAiService {
             ${text.take(12_000)}
             </journal_entry>
         """.trimIndent()
-        return model.generateContent(prompt).text.trim().also { require(it.isNotBlank()) { "Gemini Nano did not return a reflection." } }
+        return model.generateContent(prompt).candidates
+            .firstOrNull()
+            ?.text
+            .orEmpty()
+            .trim()
+            .also { require(it.isNotBlank()) { "Gemini Nano did not return a reflection." } }
     }
 
     fun close() = model.close()
