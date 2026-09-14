@@ -36,7 +36,9 @@ import androidx.compose.ui.platform.LocalView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jbeckerit.drift.AppContainer
 import com.jbeckerit.drift.data.Task
+import com.jbeckerit.drift.data.TaskSource
 import kotlinx.coroutines.launch
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -54,21 +56,29 @@ fun TodayScreen(
     val view = LocalView.current
     val today by repository.observeToday().collectAsStateWithLifecycle(initialValue = emptyList())
     val todos by repository.observeTodos().collectAsStateWithLifecycle(initialValue = emptyList())
+    val templates by repository.observeTemplates().collectAsStateWithLifecycle(initialValue = emptyList())
     val entries by repository.observeEntries().collectAsStateWithLifecycle(initialValue = emptyList())
     val currentSlot = remember { currentSlot() }
 
     LaunchedEffect(Unit) { repository.ensureCurrent() }
 
-    val visibleTasks = remember(today, todos, currentSlot) {
-        val currentRoutine = today.filter { !it.done && it.slot == currentSlot }
-        val oneOff = today.filter { !it.done && it.slot == null }
+    val orderedToday = remember(today, templates) {
+        val templateOrder = templates.associate { it.id to it.sortOrder }
+        today.sortedWith(compareBy<Task> { it.done }.thenBy { templateOrder[it.templateId] ?: Int.MAX_VALUE }.thenBy { it.createdAt })
+    }
+    val visibleTasks = remember(orderedToday, todos, currentSlot) {
+        val currentRoutine = orderedToday.filter { !it.done && it.slot == currentSlot }
+        val oneOff = orderedToday.filter { !it.done && it.slot == null }
         val dueTodos = todos.filter { !it.done && (it.dueDate == null || it.dueDate <= LocalDate.now().toString()) }
         (currentRoutine + oneOff + dueTodos).distinctBy(Task::id).take(3)
     }
     val allActionable = remember(today, todos) { (today + todos).filterNot { it.done } }
     val completed = remember(today, todos) { (today + todos).count { it.done } }
     val total = today.size + todos.size
-    val hasWrittenToday = remember(entries) { entries.any { entry -> formatDate(entry.createdAt) == formatDate(System.currentTimeMillis()) } }
+    val hasWrittenToday = remember(entries) {
+        val localToday = LocalDate.now()
+        entries.any { entry -> Instant.ofEpochMilli(entry.createdAt).atZone(java.time.ZoneId.systemDefault()).toLocalDate() == localToday }
+    }
 
     androidx.compose.foundation.lazy.LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -182,7 +192,10 @@ private fun greeting(hour: Int = LocalTime.now().hour): String = when {
 
 private fun taskDetail(task: Task): String? = when {
     task.slot != null -> task.slot.replaceFirstChar { it.uppercase() }
+    task.dueDate != null && task.dueDate < LocalDate.now().toString() -> "Overdue · ${task.dueDate}"
+    task.dueDate != null && task.dueDate == LocalDate.now().toString() -> "Due today"
     task.dueDate != null -> "Due ${task.dueDate}"
     task.weekKey != null -> "This week"
+    task.source == TaskSource.EXTRACTED -> "From your journal"
     else -> null
 }

@@ -14,7 +14,12 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-data class AiSettings(val key: String = "", val model: String = "openai/gpt-4o-mini", val personality: String = "coach")
+data class AiSettings(
+    val key: String = "",
+    val model: String = "openai/gpt-4o-mini",
+    val personality: String = "coach",
+    val automaticInsights: Boolean = false,
+)
 data class ReminderSettings(val enabled: Boolean = false, val morning: String = "08:00", val evening: String = "20:00", val taskTime: String = "18:00")
 data class SyncSettings(val enabled: Boolean = false, val url: String = "", val username: String = "", val password: String = "")
 data class OnboardingSettings(val completed: Boolean = false)
@@ -33,7 +38,7 @@ class SecureSettings(context: Context) {
     val state: StateFlow<AppSettings> = _state
 
     fun current() = _state.value
-    fun saveAi(value: AiSettings) = save("ai", JSONObject().put("key", value.key).put("model", value.model).put("personality", value.personality).toString())
+    fun saveAi(value: AiSettings) = save("ai", JSONObject().put("key", value.key).put("model", value.model).put("personality", value.personality).put("automaticInsights", value.automaticInsights).toString())
     fun saveReminders(value: ReminderSettings) = save("reminders", JSONObject().put("enabled", value.enabled).put("morning", value.morning).put("evening", value.evening).put("taskTime", value.taskTime).toString())
     fun saveSync(value: SyncSettings) = save("sync", JSONObject().put("enabled", value.enabled).put("url", value.url).put("username", value.username).put("password", value.password).toString())
     fun saveOnboarding(value: OnboardingSettings) = save("onboarding", JSONObject().put("completed", value.completed).toString())
@@ -45,7 +50,7 @@ class SecureSettings(context: Context) {
     }
 
     private fun readAll() = AppSettings(readAi(), readReminders(), readSync(), readOnboarding(), readBackup())
-    private fun readAi() = runCatching { JSONObject(read("ai") ?: return@runCatching AiSettings()).let { AiSettings(it.optString("key"), it.optString("model", "openai/gpt-4o-mini"), it.optString("personality", "coach")) } }.getOrDefault(AiSettings())
+    private fun readAi() = runCatching { JSONObject(read("ai") ?: return@runCatching AiSettings()).let { AiSettings(it.optString("key"), it.optString("model", "openai/gpt-4o-mini"), it.optString("personality", "coach"), it.optBoolean("automaticInsights")) } }.getOrDefault(AiSettings())
     private fun readReminders() = runCatching { JSONObject(read("reminders") ?: return@runCatching ReminderSettings()).let { ReminderSettings(it.optBoolean("enabled"), it.optString("morning", "08:00"), it.optString("evening", "20:00"), it.optString("taskTime", "18:00")) } }.getOrDefault(ReminderSettings())
     private fun readSync() = runCatching { JSONObject(read("sync") ?: return@runCatching SyncSettings()).let { SyncSettings(it.optBoolean("enabled"), it.optString("url"), it.optString("username"), it.optString("password")) } }.getOrDefault(SyncSettings())
     private fun readOnboarding() = runCatching { JSONObject(read("onboarding") ?: return@runCatching OnboardingSettings()).let { OnboardingSettings(it.optBoolean("completed")) } }.getOrDefault(OnboardingSettings())

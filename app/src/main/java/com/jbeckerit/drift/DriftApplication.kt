@@ -11,8 +11,12 @@ import com.jbeckerit.drift.reminders.NotificationChannels
 import com.jbeckerit.drift.reminders.ReminderScheduler
 import com.jbeckerit.drift.sync.WebDavSync
 import com.jbeckerit.drift.work.WorkScheduler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 
 class DriftApplication : Application() {
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     lateinit var container: AppContainer
         private set
 
@@ -31,6 +35,7 @@ class DriftApplication : Application() {
             ai = AiService(settings, repository),
             nano = OnDeviceAiService(),
             backup = BackupService(this, repository, settings),
+            appScope = appScope,
             webDav = WebDavSync(repository),
             reminders = ReminderScheduler(this),
             work = scheduler,
@@ -46,6 +51,7 @@ data class AppContainer(
     val ai: AiService,
     val nano: OnDeviceAiService,
     val backup: BackupService,
+    val appScope: CoroutineScope,
     val webDav: WebDavSync,
     val reminders: ReminderScheduler,
     val work: WorkScheduler,

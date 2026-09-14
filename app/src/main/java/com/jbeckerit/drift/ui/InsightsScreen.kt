@@ -16,6 +16,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -25,22 +26,31 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jbeckerit.drift.AppContainer
-import com.jbeckerit.drift.data.Entry
+import com.jbeckerit.drift.data.GentleStreaks
+import com.jbeckerit.drift.data.ContextMemory
+import com.jbeckerit.drift.data.toStringList
 import kotlinx.coroutines.launch
 import java.time.Instant
-import java.time.LocalDate
 import java.time.ZoneId
 
 @Composable
 fun ReflectScreen(container: AppContainer, onCoach: () -> Unit) {
     val entries by container.repository.observeEntries().collectAsStateWithLifecycle(initialValue = emptyList())
+    val rewards by container.repository.observeRewards().collectAsStateWithLifecycle(initialValue = emptyList())
+    val appSettings by container.settings.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var summary by remember { mutableStateOf("") }
+    var contextMemory by remember { mutableStateOf<ContextMemory?>(null) }
     var working by remember { mutableStateOf(false) }
+    var contextWorking by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val words = remember(entries) { entries.sumOf { it.body.trim().split(Regex("\\s+")).count(String::isNotBlank) } }
     val mood = remember(entries) { entries.mapNotNull { it.mood }.takeIf { it.isNotEmpty() }?.average() }
-    val streak = remember(entries) { entryStreak(entries) }
+    val streak = remember(entries) {
+        GentleStreaks.calculate(entries.map { Instant.ofEpochMilli(it.createdAt).atZone(ZoneId.systemDefault()).toLocalDate() })
+    }
+
+    LaunchedEffect(entries) { contextMemory = container.repository.contextMemory() }
 
     androidx.compose.foundation.lazy.LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -65,8 +75,50 @@ fun ReflectScreen(container: AppContainer, onCoach: () -> Unit) {
                     modifier = Modifier.padding(top = DriftSpace.xSmall),
                 )
                 if (entries.isNotEmpty()) {
-                    Text("Current rhythm: $streak ${if (streak == 1) "day" else "days"}", modifier = Modifier.padding(top = DriftSpace.small), color = MaterialTheme.colorScheme.primary)
+                    Text("Gentle rhythm: ${streak.current} ${if (streak.current == 1) "day" else "days"}", modifier = Modifier.padding(top = DriftSpace.small), color = MaterialTheme.colorScheme.primary)
+                    Text("Longest rhythm: ${streak.longest} days · one missed day is okay", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (mood != null) Text("Average mood: ${"%.1f".format(mood)} / 5", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        if (rewards.isNotEmpty()) item {
+            SectionCard {
+                Text("Moments you made room for", style = MaterialTheme.typography.titleMedium)
+                rewards.take(3).forEach { reward ->
+                    Text(reward.label, modifier = Modifier.padding(top = DriftSpace.medium), color = MaterialTheme.colorScheme.primary)
+                    Text(reward.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        if (contextMemory != null || entries.isNotEmpty()) item {
+            SectionCard {
+                Text("Your continuing picture", style = MaterialTheme.typography.titleMedium)
+                val memory = contextMemory
+                if (memory?.moodTrend?.isNotBlank() == true) {
+                    Text(memory.moodTrend, modifier = Modifier.padding(top = DriftSpace.small), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Text("When it feels useful, Drift can keep a small, grounded record of recurring threads.", modifier = Modifier.padding(top = DriftSpace.xSmall), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                val patterns = memory?.patternsJson?.toStringList().orEmpty()
+                if (patterns.isNotEmpty()) Text(patterns.joinToString(" · "), modifier = Modifier.padding(top = DriftSpace.small), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                if (appSettings.ai.key.isNotBlank()) {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                contextWorking = true
+                                error = null
+                                runCatching { container.ai.refreshContextMemory() }
+                                    .onSuccess { memory ->
+                                        contextMemory = memory
+                                        if (memory == null) error = "Analyze an entry first, then Drift can build a grounded context."
+                                    }
+                                    .onFailure { error = it.message ?: "Drift could not update your context." }
+                                contextWorking = false
+                            }
+                        },
+                        enabled = !contextWorking && !working,
+                        modifier = Modifier.padding(top = DriftSpace.small),
+                    ) { Text(if (contextWorking) "Updating…" else "Update context") }
                 }
             }
         }
@@ -101,18 +153,4 @@ fun ReflectScreen(container: AppContainer, onCoach: () -> Unit) {
             }
         }
     }
-}
-
-private fun entryStreak(entries: List<Entry>): Int {
-    if (entries.isEmpty()) return 0
-    val zone = ZoneId.systemDefault()
-    val dates = entries.map { Instant.ofEpochMilli(it.createdAt).atZone(zone).toLocalDate() }.toSet()
-    var cursor = LocalDate.now(zone)
-    if (cursor !in dates) cursor = cursor.minusDays(1)
-    var streak = 0
-    while (cursor in dates) {
-        streak++
-        cursor = cursor.minusDays(1)
-    }
-    return streak
 }

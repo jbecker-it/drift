@@ -18,7 +18,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
@@ -51,6 +53,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jbeckerit.drift.AppContainer
 import com.jbeckerit.drift.ai.NanoAvailability
 import com.jbeckerit.drift.data.Entry
+import com.jbeckerit.drift.data.EntryTagData
+import com.jbeckerit.drift.data.toTagData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -104,6 +108,7 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
     val scope = rememberCoroutineScope()
     val lifecycle = LocalLifecycleOwner.current
     val nanoAvailability by container.nano.availability.collectAsStateWithLifecycle()
+    val appSettings by container.settings.state.collectAsStateWithLifecycle()
     var ready by rememberSaveable(entryId) { mutableStateOf(false) }
     var actualId by rememberSaveable(entryId) { mutableStateOf("") }
     var body by rememberSaveable(entryId) { mutableStateOf("") }
@@ -111,10 +116,16 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
     var persistedBody by rememberSaveable(entryId) { mutableStateOf("") }
     var persistedMood by rememberSaveable(entryId) { mutableStateOf<Int?>(null) }
     var reflection by rememberSaveable(entryId) { mutableStateOf("") }
+    var tagData by remember(entryId) { mutableStateOf<EntryTagData?>(null) }
     var status by rememberSaveable(entryId) { mutableStateOf("") }
     var error by rememberSaveable(entryId) { mutableStateOf<String?>(null) }
     var saving by rememberSaveable(entryId) { mutableStateOf(false) }
     var reflecting by rememberSaveable(entryId) { mutableStateOf(false) }
+    var analyzing by rememberSaveable(entryId) { mutableStateOf(false) }
+    var suggestions by remember(entryId) { mutableStateOf(emptyList<String>()) }
+    var suggesting by rememberSaveable(entryId) { mutableStateOf(false) }
+    var showSuggestions by rememberSaveable(entryId) { mutableStateOf(false) }
+    var confirmDelete by rememberSaveable(entryId) { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { container.nano.refresh() }
 
@@ -126,6 +137,7 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
         persistedBody = body
         persistedMood = mood
         reflection = initial?.reflection.orEmpty()
+        tagData = initial?.let { repository.entryTags(it.id)?.toTagData() }
         ready = true
     }
 
@@ -172,9 +184,12 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
         scope.launch {
             saving = true
             runCatching { repository.saveEntry(actualId, body, mood) }
-                .onSuccess {
+                .onSuccess { saved ->
                     persistedBody = body
                     persistedMood = mood
+                    if (appSettings.ai.automaticInsights && appSettings.ai.key.isNotBlank()) {
+                        container.appScope.launch { runCatching { container.ai.analyzeEntry(saved) } }
+                    }
                     onDone()
                 }
                 .onFailure { error = it.message ?: "Drift could not save that entry." }
@@ -197,7 +212,12 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
                 }
             },
             actions = {
-                TextButton(onClick = ::saveAndClose, enabled = ready && !saving) {
+                if (entryId != null) {
+                    IconButton(onClick = { confirmDelete = true }, enabled = ready && !saving && !reflecting && !analyzing) {
+                        Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete journal entry")
+                    }
+                }
+                TextButton(onClick = ::saveAndClose, enabled = ready && !saving && !reflecting && !analyzing) {
                     if (saving) {
                         CircularProgressIndicator(modifier = Modifier.padding(end = DriftSpace.xSmall), strokeWidth = 2.dp)
                     } else {
@@ -221,7 +241,11 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
                 enabled = ready,
             )
             Column {
-                Text("How does it feel?", style = MaterialTheme.typography.labelLarge)
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("How does it feel?", style = MaterialTheme.typography.labelLarge)
+                    val words = body.trim().split(Regex("\\s+")).count(String::isNotBlank)
+                    if (words > 0) Text("$words ${if (words == 1) "word" else "words"}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(DriftSpace.small), modifier = Modifier.padding(top = DriftSpace.small)) {
                     listOf("😞", "😕", "😐", "🙂", "😄").forEachIndexed { index, label ->
                         FilterChip(
@@ -261,7 +285,7 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
                             reflecting = false
                         }
                     },
-                    enabled = ready && !reflecting,
+                    enabled = ready && !reflecting && !analyzing,
                     modifier = Modifier.weight(1f),
                 ) {
                     if (reflecting) {
@@ -269,10 +293,47 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
                         Text("Reflecting", modifier = Modifier.padding(start = DriftSpace.small))
                     } else {
                         Icon(Icons.Rounded.AutoAwesome, contentDescription = null)
-                        Text("Reflect", modifier = Modifier.padding(start = DriftSpace.small))
+                        Text("Reflect with AI", modifier = Modifier.padding(start = DriftSpace.small))
                     }
                 }
-                Button(onClick = ::saveAndClose, enabled = ready && !saving, modifier = Modifier.weight(1f)) { Text("Save entry") }
+                Button(onClick = ::saveAndClose, enabled = ready && !saving && !reflecting && !analyzing, modifier = Modifier.weight(1f)) { Text("Save entry") }
+            }
+            if (body.isBlank() && appSettings.ai.key.isNotBlank()) {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            suggesting = true
+                            showSuggestions = true
+                            error = null
+                            runCatching { container.ai.topicSuggestions() }
+                                .onSuccess { result ->
+                                    suggestions = result
+                                    if (result.isEmpty()) error = "Write a couple of entries first, then Drift can offer a grounded starting point."
+                                }
+                                .onFailure { error = it.message ?: "Drift could not suggest a starting point." }
+                            suggesting = false
+                        }
+                    },
+                    enabled = ready && !suggesting && !reflecting && !analyzing,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (suggesting) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Text(if (suggesting) "Finding a starting point" else "Need a starting point?", modifier = Modifier.padding(start = if (suggesting) DriftSpace.small else 0.dp))
+                }
+            }
+            if (showSuggestions && suggestions.isNotEmpty()) {
+                SectionCard {
+                    Text("A few places you could begin", style = MaterialTheme.typography.titleMedium)
+                    suggestions.forEach { suggestion ->
+                        TextButton(
+                            onClick = {
+                                body = if (body.isBlank()) suggestion else "$body\n\n$suggestion"
+                                showSuggestions = false
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(suggestion, modifier = Modifier.fillMaxWidth()) }
+                    }
+                }
             }
             if (nanoAvailability is NanoAvailability.Ready) {
                 TextButton(
@@ -302,20 +363,90 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
                             reflecting = false
                         }
                     },
-                    enabled = ready && !reflecting,
+                    enabled = ready && !reflecting && !analyzing,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Icon(Icons.Rounded.AutoAwesome, contentDescription = null)
                     Text("Reflect privately on this phone", modifier = Modifier.padding(start = DriftSpace.small))
                 }
             }
+            if (appSettings.ai.key.isNotBlank()) {
+                TextButton(
+                    onClick = {
+                        if (body.isBlank()) {
+                            error = "Write a little first, then Drift can find grounded patterns."
+                            return@TextButton
+                        }
+                        val textAtRequest = body
+                        val moodAtRequest = mood
+                        val idAtRequest = actualId
+                        scope.launch {
+                            analyzing = true
+                            error = null
+                            runCatching {
+                                val saved = repository.saveEntry(idAtRequest, textAtRequest, moodAtRequest)
+                                saved to container.ai.analyzeEntry(saved)
+                            }.onSuccess { (_, insight) ->
+                                persistedBody = textAtRequest
+                                persistedMood = moodAtRequest
+                                tagData = insight
+                                status = if (insight.mentions.tasksOpen.isEmpty()) "Patterns saved" else "Patterns saved · clear unfinished tasks added"
+                            }.onFailure { error = it.message ?: "Drift could not find patterns in this entry." }
+                            analyzing = false
+                        }
+                    },
+                    enabled = ready && !reflecting && !analyzing,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (analyzing) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text("Finding patterns", modifier = Modifier.padding(start = DriftSpace.small))
+                    } else {
+                        Text("Find patterns", modifier = Modifier.padding(start = DriftSpace.small))
+                    }
+                }
+            }
             ErrorText(error)
+            tagData?.let { InsightCard(it) }
             if (reflection.isNotBlank() || reflecting) {
                 SectionCard {
                     Text("A reflection", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(if (reflection.isBlank()) "Thinking…" else reflection, modifier = Modifier.padding(top = DriftSpace.small))
                 }
             }
+        }
+    }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete this entry?") },
+            text = { Text("This also removes its saved patterns and journal-linked tasks from this phone and future syncs.") },
+            confirmButton = {
+                Button(onClick = {
+                    scope.launch {
+                        ready = false
+                        repository.deleteEntry(actualId)
+                        onDone()
+                    }
+                }) { Text("Delete entry") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep it") } },
+        )
+    }
+}
+
+@Composable
+private fun InsightCard(insight: EntryTagData) {
+    SectionCard {
+        Text("What Drift noticed", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        if (insight.oneLineSummary.isNotBlank()) {
+            Text(insight.oneLineSummary, modifier = Modifier.padding(top = DriftSpace.small))
+        }
+        if (insight.topics.isNotEmpty()) {
+            Text(insight.topics.joinToString(" · "), modifier = Modifier.padding(top = DriftSpace.small), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+        }
+        if (insight.mentions.tasksOpen.isNotEmpty()) {
+            Text("Added to To-dos: ${insight.mentions.tasksOpen.joinToString(", ")}", modifier = Modifier.padding(top = DriftSpace.small), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

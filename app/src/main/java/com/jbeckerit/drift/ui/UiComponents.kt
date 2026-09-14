@@ -164,7 +164,7 @@ fun TaskRow(
     task: Task,
     detail: String? = null,
     onToggle: () -> Unit,
-    onMore: (() -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     val contentColor by animateColorAsState(
         targetValue = if (task.done) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
@@ -197,9 +197,7 @@ fun TaskRow(
                     Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            if (onMore != null) {
-                TextButton(onClick = onMore) { Text("More") }
-            }
+            trailing?.invoke()
         }
     }
 }

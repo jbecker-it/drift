@@ -1,5 +1,7 @@
 package com.jbeckerit.drift.ui
 
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
@@ -7,6 +9,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -84,9 +87,19 @@ private val DriftShapes = Shapes(
 )
 
 @Composable
-fun DriftTheme(darkTheme: Boolean, content: @Composable () -> Unit) {
+fun DriftTheme(darkTheme: Boolean, useDynamicColor: Boolean = true, content: @Composable () -> Unit) {
+    // Drift is Android 16+ only, so wallpaper-derived Material colors are always
+    // available. Keeping the calm fallback palette makes previews and future
+    // branded surfaces deterministic without adding a settings decision.
+    val context = LocalContext.current
+    val colorScheme = when {
+        useDynamicColor && darkTheme -> dynamicDarkColorScheme(context)
+        useDynamicColor -> dynamicLightColorScheme(context)
+        darkTheme -> DriftDarkColors
+        else -> DriftLightColors
+    }
     MaterialTheme(
-        colorScheme = if (darkTheme) DriftDarkColors else DriftLightColors,
+        colorScheme = colorScheme,
         typography = DriftTypography,
         shapes = DriftShapes,
         content = content,

@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.padding
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -37,7 +38,7 @@ class MainActivity : ComponentActivity() {
         val container = (application as DriftApplication).container
         setContent {
             val settings by container.settings.state.collectAsStateWithLifecycle()
-            DriftTheme(darkTheme = true) {
+            DriftTheme(darkTheme = isSystemInDarkTheme()) {
                 DriftApp(
                     container = container,
                     onboardingComplete = settings.onboarding.completed,

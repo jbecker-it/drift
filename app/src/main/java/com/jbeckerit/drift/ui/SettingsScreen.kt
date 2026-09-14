@@ -62,6 +62,7 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
     var key by remember { mutableStateOf("") }
     var model by remember { mutableStateOf("") }
     var personality by remember { mutableStateOf("coach") }
+    var automaticInsights by remember { mutableStateOf(false) }
     var reminders by remember { mutableStateOf(false) }
     var morning by remember { mutableStateOf("08:00") }
     var evening by remember { mutableStateOf("20:00") }
@@ -124,6 +125,7 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
         key = state.ai.key
         model = state.ai.model
         personality = state.ai.personality
+        automaticInsights = state.ai.automaticInsights
         reminders = state.reminders.enabled
         morning = state.reminders.morning
         evening = state.reminders.evening
@@ -201,9 +203,16 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
                             FilterChip(selected = personality == option, onClick = { personality = option }, label = { Text(option.replaceFirstChar { it.uppercase() }) })
                         }
                     }
+                    Row(modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.medium), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Find patterns after saving")
+                            Text("Sends each new saved entry to your configured provider.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(checked = automaticInsights, onCheckedChange = { automaticInsights = it })
+                    }
                     Button(
                         onClick = {
-                            container.settings.saveAi(AiSettings(key.trim(), model.trim().ifBlank { "openai/gpt-4o-mini" }, personality))
+                            container.settings.saveAi(AiSettings(key.trim(), model.trim().ifBlank { "openai/gpt-4o-mini" }, personality, automaticInsights))
                             status = "Cloud AI settings saved."
                         },
                         modifier = Modifier.padding(top = DriftSpace.medium),
