@@ -28,18 +28,6 @@ android {
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
 
-// Gemini Nano's ML Kit artifact currently declares a newer Kotlin stdlib than
-// the compiler used by this project. Keep the compile classpath aligned so KAPT
-// can read every Kotlin module consistently.
-configurations.configureEach {
-    resolutionStrategy.force(
-        "org.jetbrains.kotlin:kotlin-stdlib:2.0.21",
-        "org.jetbrains.kotlin:kotlin-stdlib-common:2.0.21",
-        "org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.0.21",
-        "org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.0.21"
-    )
-}
-
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)

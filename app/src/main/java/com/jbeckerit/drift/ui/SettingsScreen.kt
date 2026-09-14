@@ -154,9 +154,9 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
             item {
                 SectionCard {
                     SettingHeading(Icons.Rounded.Backup, "Backups", "An encrypted copy you can restore on another phone.")
-                    if (state.backup.lastSuccessAt != null) {
+                    state.backup.lastSuccessAt?.let { lastBackupAt ->
                         Text(
-                            "Last backup: ${formatDate(state.backup.lastSuccessAt)} · ${state.backup.entries} entries, ${state.backup.tasks} tasks",
+                            "Last backup: ${formatDate(lastBackupAt)} · ${state.backup.entries} entries, ${state.backup.tasks} tasks",
                             modifier = Modifier.padding(top = DriftSpace.medium),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary,
