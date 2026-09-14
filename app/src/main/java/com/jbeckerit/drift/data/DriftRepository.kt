@@ -251,7 +251,7 @@ class DriftRepository(private val database: DriftDatabase, private val afterChan
         val today = TaskKeys.today()
         val parts = mutableListOf<String>()
         val undone = dao.daily(today).filterNot(Task::done)
-        if (undone.isNotEmpty()) parts += "Undone today: ${undone.take(4).joinToString(", ") { it.text }"
+        if (undone.isNotEmpty()) parts += "Undone today: ${undone.take(4).joinToString(", ") { it.text }}"
         val todos = dao.observeTodos().first().filterNot(Task::done)
         val overdue = todos.filter { it.dueDate != null && it.dueDate < today }
         val dueToday = todos.filter { it.dueDate == today }
