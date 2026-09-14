@@ -3,26 +3,38 @@
 package com.jbeckerit.drift.ui
 
 import android.Manifest
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Backup
+import androidx.compose.material.icons.rounded.CloudSync
+import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Notifications
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -32,17 +44,20 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jbeckerit.drift.AppContainer
+import com.jbeckerit.drift.backup.BackupInfo
+import com.jbeckerit.drift.ai.NanoAvailability
 import com.jbeckerit.drift.data.AiSettings
 import com.jbeckerit.drift.data.ReminderSettings
 import com.jbeckerit.drift.data.SyncSettings
 import kotlinx.coroutines.launch
+import java.time.LocalDate
 
 @Composable
 fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
     val state by container.settings.state.collectAsStateWithLifecycle()
+    val nanoAvailability by container.nano.availability.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var key by remember { mutableStateOf("") }
     var model by remember { mutableStateOf("") }
@@ -55,16 +70,68 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
     var syncUrl by remember { mutableStateOf("") }
     var syncUser by remember { mutableStateOf("") }
     var syncPassword by remember { mutableStateOf("") }
+    var backupPassword by remember { mutableStateOf("") }
+    var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingRestoreInfo by remember { mutableStateOf<BackupInfo?>(null) }
     var status by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    var working by remember { mutableStateOf(false) }
+
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        status = if (granted) "Notifications enabled" else "Android notification permission was not granted"
+        status = if (granted) "Notifications are allowed." else "Android notification permission was not granted."
+    }
+    val createBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val secret = backupPassword.toCharArray()
+                working = true
+                error = null
+                status = "Creating encrypted backup…"
+                runCatching { container.backup.create(uri, secret) }
+                    .onSuccess { info ->
+                        status = "Backup saved: ${info.entries} entries, ${info.tasks} tasks."
+                        backupPassword = ""
+                    }
+                    .onFailure { error = it.message ?: "Drift could not create that backup." }
+                secret.fill('\u0000')
+                working = false
+            }
+        }
+    }
+    val openBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val secret = backupPassword.toCharArray()
+                working = true
+                error = null
+                status = "Checking backup…"
+                runCatching { container.backup.inspect(uri, secret) }
+                    .onSuccess { info ->
+                        pendingRestoreUri = uri
+                        pendingRestoreInfo = info
+                        status = ""
+                    }
+                    .onFailure { error = it.message ?: "Drift could not read that backup." }
+                secret.fill('\u0000')
+                working = false
+            }
+        }
     }
 
+    LaunchedEffect(Unit) { container.nano.refresh() }
+
     LaunchedEffect(state) {
-        key = state.ai.key; model = state.ai.model; personality = state.ai.personality
-        reminders = state.reminders.enabled; morning = state.reminders.morning; evening = state.reminders.evening; taskTime = state.reminders.taskTime
-        syncEnabled = state.sync.enabled; syncUrl = state.sync.url; syncUser = state.sync.username; syncPassword = state.sync.password
+        key = state.ai.key
+        model = state.ai.model
+        personality = state.ai.personality
+        reminders = state.reminders.enabled
+        morning = state.reminders.morning
+        evening = state.reminders.evening
+        taskTime = state.reminders.taskTime
+        syncEnabled = state.sync.enabled
+        syncUrl = state.sync.url
+        syncUser = state.sync.username
+        syncPassword = state.sync.password
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -78,79 +145,220 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back") } },
         )
         LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
-    ) {
-        item {
-            SectionCard {
-                Text("AI", style = MaterialTheme.typography.titleMedium)
-                Text("AI is optional. Saving, drafts, tasks, reminders, and sync do not depend on it.", modifier = Modifier.padding(top = 6.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                OutlinedTextField(value = key, onValueChange = { key = it }, label = { Text("OpenRouter API key") }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp), visualTransformation = PasswordVisualTransformation(), singleLine = true)
-                OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("Model") }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp), singleLine = true)
-                Text("Style", modifier = Modifier.padding(top = 10.dp), style = MaterialTheme.typography.labelLarge)
-                androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("coach", "listener", "challenger").forEach { option ->
-                        FilterChip(selected = personality == option, onClick = { personality = option }, label = { Text(option.replaceFirstChar { it.uppercase() }) })
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(DriftSpace.medium),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(start = DriftSpace.xLarge, end = DriftSpace.xLarge, bottom = DriftSpace.xLarge),
+        ) {
+            item {
+                SectionCard {
+                    SettingHeading(Icons.Rounded.Backup, "Backups", "An encrypted copy you can restore on another phone.")
+                    if (state.backup.lastSuccessAt != null) {
+                        Text(
+                            "Last backup: ${formatDate(state.backup.lastSuccessAt)} · ${state.backup.entries} entries, ${state.backup.tasks} tasks",
+                            modifier = Modifier.padding(top = DriftSpace.medium),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    OutlinedTextField(
+                        value = backupPassword,
+                        onValueChange = { backupPassword = it; error = null },
+                        label = { Text("Backup password") },
+                        supportingText = { Text("Use at least 10 characters. Drift cannot recover it for you.") },
+                        modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.medium),
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                    )
+                    Row(modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.small), horizontalArrangement = Arrangement.spacedBy(DriftSpace.small)) {
+                        Button(
+                            onClick = {
+                                if (backupPassword.length < 10) error = "Use a backup password with at least 10 characters."
+                                else createBackup.launch("drift-backup-${LocalDate.now()}.drift")
+                            },
+                            enabled = !working,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Back up now") }
+                        OutlinedButton(
+                            onClick = {
+                                if (backupPassword.length < 10) error = "Enter the backup password first."
+                                else openBackup.launch(arrayOf("application/octet-stream", "application/x-drift-backup"))
+                            },
+                            enabled = !working,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Restore") }
+                    }
+                    Text("Backups never include your AI key or WebDAV password.", modifier = Modifier.padding(top = DriftSpace.medium), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            item {
+                SectionCard {
+                    SettingHeading(Icons.Rounded.Key, "Cloud AI", "Optional. Your journal stays usable without it.")
+                    OutlinedTextField(value = key, onValueChange = { key = it }, label = { Text("OpenRouter API key") }, modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.medium), visualTransformation = PasswordVisualTransformation(), singleLine = true)
+                    OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("Model") }, modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.small), singleLine = true)
+                    Text("Style", modifier = Modifier.padding(top = DriftSpace.medium), style = MaterialTheme.typography.labelLarge)
+                    Row(horizontalArrangement = Arrangement.spacedBy(DriftSpace.small), modifier = Modifier.padding(top = DriftSpace.small)) {
+                        listOf("coach", "listener", "challenger").forEach { option ->
+                            FilterChip(selected = personality == option, onClick = { personality = option }, label = { Text(option.replaceFirstChar { it.uppercase() }) })
+                        }
+                    }
+                    Button(
+                        onClick = {
+                            container.settings.saveAi(AiSettings(key.trim(), model.trim().ifBlank { "openai/gpt-4o-mini" }, personality))
+                            status = "Cloud AI settings saved."
+                        },
+                        modifier = Modifier.padding(top = DriftSpace.medium),
+                    ) { Text("Save AI settings") }
+                }
+            }
+            item {
+                SectionCard {
+                    SettingHeading(Icons.Rounded.AutoAwesome, "On-device assistance", "Use Gemini Nano locally when your phone supports it.")
+                    when (val availability = nanoAvailability) {
+                        NanoAvailability.Checking -> Text("Checking this phone…", modifier = Modifier.padding(top = DriftSpace.medium), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        NanoAvailability.Downloadable -> {
+                            Text("Gemini Nano can be downloaded for private, offline reflections.", modifier = Modifier.padding(top = DriftSpace.medium), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Button(onClick = { scope.launch { container.nano.download() } }, modifier = Modifier.padding(top = DriftSpace.medium)) { Text("Download Gemini Nano") }
+                        }
+                        NanoAvailability.Downloading -> {
+                            Row(modifier = Modifier.padding(top = DriftSpace.medium), horizontalArrangement = Arrangement.spacedBy(DriftSpace.small)) {
+                                CircularProgressIndicator()
+                                Text("Downloading Gemini Nano…")
+                            }
+                        }
+                        is NanoAvailability.Ready -> {
+                            Text(
+                                if (availability.modelName.isNullOrBlank()) "Gemini Nano is ready for private, offline reflections." else "${availability.modelName} is ready for private, offline reflections.",
+                                modifier = Modifier.padding(top = DriftSpace.medium),
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            OutlinedButton(onClick = { scope.launch { container.nano.refresh() } }, modifier = Modifier.padding(top = DriftSpace.medium)) { Text("Check again") }
+                        }
+                        is NanoAvailability.Unavailable -> {
+                            Text(availability.message, modifier = Modifier.padding(top = DriftSpace.medium), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            OutlinedButton(onClick = { scope.launch { container.nano.refresh() } }, modifier = Modifier.padding(top = DriftSpace.medium)) { Text("Check again") }
+                        }
+                    }
+                    Text("Drift checks the AICore service on your phone. No journal text leaves the phone for this feature.", modifier = Modifier.padding(top = DriftSpace.medium), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            item {
+                SectionCard {
+                    SettingHeading(Icons.Rounded.Notifications, "Reminders", "Ask gently, only at times you choose.")
+                    Row(modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.small), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Use Android reminders")
+                        Switch(checked = reminders, onCheckedChange = { reminders = it })
+                    }
+                    OutlinedTextField(value = morning, onValueChange = { morning = it }, label = { Text("Morning (HH:MM)") }, modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.small), singleLine = true)
+                    OutlinedTextField(value = evening, onValueChange = { evening = it }, label = { Text("Evening (HH:MM)") }, modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.small), singleLine = true)
+                    OutlinedTextField(value = taskTime, onValueChange = { taskTime = it }, label = { Text("Tasks (HH:MM)") }, modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.small), singleLine = true)
+                    Row(horizontalArrangement = Arrangement.spacedBy(DriftSpace.small), modifier = Modifier.padding(top = DriftSpace.medium)) {
+                        Button(onClick = {
+                            val value = ReminderSettings(reminders, morning, evening, taskTime)
+                            container.settings.saveReminders(value)
+                            container.reminders.scheduleAll(value)
+                            status = "Reminder schedule saved."
+                        }) { Text("Save reminders") }
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            OutlinedButton(onClick = { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("Allow") }
+                        }
                     }
                 }
-                Button(onClick = { container.settings.saveAi(AiSettings(key.trim(), model.trim().ifBlank { "openai/gpt-4o-mini" }, personality)); status = "AI settings saved" }, modifier = Modifier.padding(top = 12.dp)) { Text("Save AI settings") }
             }
-        }
-        item {
-            SectionCard {
-                Text("Reminders", style = MaterialTheme.typography.titleMedium)
-                androidx.compose.foundation.layout.Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Use Android reminders", modifier = Modifier.padding(top = 10.dp))
-                    Switch(checked = reminders, onCheckedChange = { reminders = it })
-                }
-                OutlinedTextField(value = morning, onValueChange = { morning = it }, label = { Text("Morning (HH:MM)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                OutlinedTextField(value = evening, onValueChange = { evening = it }, label = { Text("Evening (HH:MM)") }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp), singleLine = true)
-                OutlinedTextField(value = taskTime, onValueChange = { taskTime = it }, label = { Text("Tasks (HH:MM)") }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp), singleLine = true)
-                Button(onClick = {
-                    val value = ReminderSettings(reminders, morning, evening, taskTime)
-                    container.settings.saveReminders(value); container.reminders.scheduleAll(value); status = "Reminder schedule saved"
-                }, modifier = Modifier.padding(top = 12.dp)) { Text("Save reminders") }
-                if (Build.VERSION.SDK_INT >= 33) Button(onClick = { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) }, modifier = Modifier.padding(start = 8.dp, top = 12.dp)) { Text("Allow notifications") }
-            }
-        }
-        item {
-            SectionCard {
-                Text("WebDAV sync", style = MaterialTheme.typography.titleMedium)
-                Text("Optional. Drift writes one drift-v2.json file. The server is your storage provider; use HTTPS and a private folder.", modifier = Modifier.padding(top = 6.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                androidx.compose.foundation.layout.Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Enable sync", modifier = Modifier.padding(top = 10.dp))
-                    Switch(checked = syncEnabled, onCheckedChange = { syncEnabled = it })
-                }
-                OutlinedTextField(value = syncUrl, onValueChange = { syncUrl = it }, label = { Text("WebDAV folder or .json URL") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                OutlinedTextField(value = syncUser, onValueChange = { syncUser = it }, label = { Text("Username") }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp), singleLine = true)
-                OutlinedTextField(value = syncPassword, onValueChange = { syncPassword = it }, label = { Text("Password or app password") }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp), visualTransformation = PasswordVisualTransformation(), singleLine = true)
-                androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 12.dp)) {
-                    Button(onClick = {
-                        val value = SyncSettings(syncEnabled, syncUrl.trim(), syncUser.trim(), syncPassword)
-                        container.settings.saveSync(value)
-                        if (value.enabled) container.work.syncSoon()
-                        status = "Sync settings saved"
-                    }) { Text("Save sync") }
-                    Button(enabled = syncEnabled, onClick = {
-                        scope.launch {
-                            error = null; status = "Syncing…"
-                            runCatching { container.webDav.sync(SyncSettings(true, syncUrl.trim(), syncUser.trim(), syncPassword)) }
-                                .onSuccess { status = "Synced ${it.entries} entries and ${it.tasks} tasks" }
-                                .onFailure { error = it.message }
-                        }
-                    }) { Text("Sync now") }
+            item {
+                SectionCard {
+                    SettingHeading(Icons.Rounded.CloudSync, "WebDAV sync", "Optional device-to-device sync through a server you control.")
+                    Row(modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.small), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Enable sync")
+                        Switch(checked = syncEnabled, onCheckedChange = { syncEnabled = it })
+                    }
+                    OutlinedTextField(value = syncUrl, onValueChange = { syncUrl = it }, label = { Text("WebDAV folder or .json URL") }, modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.small), singleLine = true)
+                    OutlinedTextField(value = syncUser, onValueChange = { syncUser = it }, label = { Text("Username") }, modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.small), singleLine = true)
+                    OutlinedTextField(value = syncPassword, onValueChange = { syncPassword = it }, label = { Text("Password or app password") }, modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.small), visualTransformation = PasswordVisualTransformation(), singleLine = true)
+                    Row(horizontalArrangement = Arrangement.spacedBy(DriftSpace.small), modifier = Modifier.padding(top = DriftSpace.medium)) {
+                        Button(onClick = {
+                            val value = SyncSettings(syncEnabled, syncUrl.trim(), syncUser.trim(), syncPassword)
+                            container.settings.saveSync(value)
+                            if (value.enabled) container.work.syncSoon()
+                            status = "Sync settings saved."
+                        }) { Text("Save sync") }
+                        OutlinedButton(enabled = syncEnabled && !working, onClick = {
+                            scope.launch {
+                                error = null
+                                status = "Syncing…"
+                                working = true
+                                runCatching { container.webDav.sync(SyncSettings(true, syncUrl.trim(), syncUser.trim(), syncPassword)) }
+                                    .onSuccess { status = "Synced ${it.entries} entries and ${it.tasks} tasks." }
+                                    .onFailure { error = it.message ?: "Drift could not sync." }
+                                working = false
+                            }
+                        }) { Text("Sync now") }
+                    }
                 }
             }
-        }
-        item {
-            SectionCard {
-                Text("Privacy", style = MaterialTheme.typography.titleMedium)
-                Text("Journal and task data live in Room on this device. The app has no account, analytics, or hidden network calls. AI text only leaves the device when you request an AI feature; WebDAV only runs when you turn it on.", modifier = Modifier.padding(top = 6.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                ErrorText(error)
-                if (status.isNotBlank()) Text(status, modifier = Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.secondary)
+            item {
+                SectionCard {
+                    Text("Privacy", style = MaterialTheme.typography.titleMedium)
+                    Text("Journal entries and tasks remain on this phone unless you choose a backup, WebDAV sync, or an AI feature. Drift has no account, tracking, or hidden network calls.", modifier = Modifier.padding(top = DriftSpace.xSmall), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (working) Row(modifier = Modifier.padding(top = DriftSpace.medium), horizontalArrangement = Arrangement.spacedBy(DriftSpace.small)) {
+                        CircularProgressIndicator()
+                        Text(status.ifBlank { "Working…" })
+                    }
+                    ErrorText(error)
+                    if (status.isNotBlank() && !working) Text(status, modifier = Modifier.padding(top = DriftSpace.small), color = MaterialTheme.colorScheme.secondary)
+                }
             }
-        }
         }
     }
+
+    val restoreUri = pendingRestoreUri
+    val restoreInfo = pendingRestoreInfo
+    if (restoreUri != null && restoreInfo != null) {
+        RestoreBackupDialog(
+            info = restoreInfo,
+            onDismiss = { pendingRestoreUri = null; pendingRestoreInfo = null },
+            onRestore = {
+                scope.launch {
+                    val secret = backupPassword.toCharArray()
+                    working = true
+                    error = null
+                    status = "Restoring backup…"
+                    runCatching { container.backup.restore(restoreUri, secret) }
+                        .onSuccess { info ->
+                            container.reminders.scheduleAll(container.settings.current().reminders)
+                            backupPassword = ""
+                            status = "Restored ${info.entries} entries and ${info.tasks} tasks."
+                        }
+                        .onFailure { error = it.message ?: "Drift could not restore that backup." }
+                    secret.fill('\u0000')
+                    pendingRestoreUri = null
+                    pendingRestoreInfo = null
+                    working = false
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun SettingHeading(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, description: String) {
+    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        Column(Modifier.padding(start = DriftSpace.medium)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(description, modifier = Modifier.padding(top = DriftSpace.xSmall), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun RestoreBackupDialog(info: BackupInfo, onDismiss: () -> Unit, onRestore: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Replace current data?") },
+        text = {
+            Text("This backup contains ${info.entries} entries, ${info.tasks} tasks, and ${info.routines} routines. Drift validates the archive before replacing data. Your current AI key and WebDAV password will be cleared.")
+        },
+        confirmButton = { Button(onClick = onRestore) { Text("Restore backup") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }

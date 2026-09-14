@@ -18,11 +18,13 @@ data class AiSettings(val key: String = "", val model: String = "openai/gpt-4o-m
 data class ReminderSettings(val enabled: Boolean = false, val morning: String = "08:00", val evening: String = "20:00", val taskTime: String = "18:00")
 data class SyncSettings(val enabled: Boolean = false, val url: String = "", val username: String = "", val password: String = "")
 data class OnboardingSettings(val completed: Boolean = false)
+data class BackupSettings(val lastSuccessAt: Long? = null, val entries: Int = 0, val tasks: Int = 0, val routines: Int = 0)
 data class AppSettings(
     val ai: AiSettings = AiSettings(),
     val reminders: ReminderSettings = ReminderSettings(),
     val sync: SyncSettings = SyncSettings(),
     val onboarding: OnboardingSettings = OnboardingSettings(),
+    val backup: BackupSettings = BackupSettings(),
 )
 
 class SecureSettings(context: Context) {
@@ -35,17 +37,19 @@ class SecureSettings(context: Context) {
     fun saveReminders(value: ReminderSettings) = save("reminders", JSONObject().put("enabled", value.enabled).put("morning", value.morning).put("evening", value.evening).put("taskTime", value.taskTime).toString())
     fun saveSync(value: SyncSettings) = save("sync", JSONObject().put("enabled", value.enabled).put("url", value.url).put("username", value.username).put("password", value.password).toString())
     fun saveOnboarding(value: OnboardingSettings) = save("onboarding", JSONObject().put("completed", value.completed).toString())
+    fun saveBackup(value: BackupSettings) = save("backup", JSONObject().put("lastSuccessAt", value.lastSuccessAt ?: JSONObject.NULL).put("entries", value.entries).put("tasks", value.tasks).put("routines", value.routines).toString())
 
     private fun save(name: String, raw: String) {
         prefs.edit().putString(name, encrypt(raw)).apply()
         _state.value = readAll()
     }
 
-    private fun readAll() = AppSettings(readAi(), readReminders(), readSync(), readOnboarding())
+    private fun readAll() = AppSettings(readAi(), readReminders(), readSync(), readOnboarding(), readBackup())
     private fun readAi() = runCatching { JSONObject(read("ai") ?: return@runCatching AiSettings()).let { AiSettings(it.optString("key"), it.optString("model", "openai/gpt-4o-mini"), it.optString("personality", "coach")) } }.getOrDefault(AiSettings())
     private fun readReminders() = runCatching { JSONObject(read("reminders") ?: return@runCatching ReminderSettings()).let { ReminderSettings(it.optBoolean("enabled"), it.optString("morning", "08:00"), it.optString("evening", "20:00"), it.optString("taskTime", "18:00")) } }.getOrDefault(ReminderSettings())
     private fun readSync() = runCatching { JSONObject(read("sync") ?: return@runCatching SyncSettings()).let { SyncSettings(it.optBoolean("enabled"), it.optString("url"), it.optString("username"), it.optString("password")) } }.getOrDefault(SyncSettings())
     private fun readOnboarding() = runCatching { JSONObject(read("onboarding") ?: return@runCatching OnboardingSettings()).let { OnboardingSettings(it.optBoolean("completed")) } }.getOrDefault(OnboardingSettings())
+    private fun readBackup() = runCatching { JSONObject(read("backup") ?: return@runCatching BackupSettings()).let { BackupSettings(if (it.has("lastSuccessAt") && !it.isNull("lastSuccessAt")) it.optLong("lastSuccessAt").takeIf { value -> value > 0 } else null, it.optInt("entries"), it.optInt("tasks"), it.optInt("routines")) } }.getOrDefault(BackupSettings())
     private fun read(name: String) = prefs.getString(name, null)?.let(::decrypt)
 
     private fun encrypt(text: String): String {

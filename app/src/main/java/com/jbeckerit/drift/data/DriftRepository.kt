@@ -128,11 +128,25 @@ class DriftRepository(private val database: DriftDatabase, private val afterChan
         if (changed) afterChange()
     }
 
-    suspend fun allForSync() = SyncBundle(dao.syncEntries(), dao.syncTasks(), dao.syncTemplates())
+    suspend fun allForSync() = database.withTransaction {
+        SyncBundle(dao.syncEntries(), dao.syncTasks(), dao.syncTemplates())
+    }
     suspend fun merge(bundle: SyncBundle) {
         val local = allForSync(); val merged = SyncBundle.merge(local, bundle)
         database.withTransaction { dao.upsertEntries(merged.entries); dao.upsertTasks(merged.tasks); dao.upsertTemplates(merged.templates) }
     }
+    suspend fun replaceAllFromBackup(bundle: SyncBundle, scheduleSync: Boolean = true) {
+        database.withTransaction {
+            dao.clearEntries()
+            dao.clearTasks()
+            dao.clearTemplates()
+            if (bundle.entries.isNotEmpty()) dao.upsertEntries(bundle.entries)
+            if (bundle.tasks.isNotEmpty()) dao.upsertTasks(bundle.tasks)
+            if (bundle.templates.isNotEmpty()) dao.upsertTemplates(bundle.templates)
+        }
+        if (scheduleSync) afterChange()
+    }
+
     suspend fun clear() { database.withTransaction { dao.clearEntries(); dao.clearTasks(); dao.clearTemplates() } }
 
     private fun localDates(): Flow<LocalDate> = flow {

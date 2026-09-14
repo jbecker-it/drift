@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.weight
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -48,6 +49,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jbeckerit.drift.AppContainer
+import com.jbeckerit.drift.ai.NanoAvailability
 import com.jbeckerit.drift.data.Entry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -101,6 +103,7 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
     val repository = container.repository
     val scope = rememberCoroutineScope()
     val lifecycle = LocalLifecycleOwner.current
+    val nanoAvailability by container.nano.availability.collectAsStateWithLifecycle()
     var ready by rememberSaveable(entryId) { mutableStateOf(false) }
     var actualId by rememberSaveable(entryId) { mutableStateOf("") }
     var body by rememberSaveable(entryId) { mutableStateOf("") }
@@ -112,6 +115,8 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
     var error by rememberSaveable(entryId) { mutableStateOf<String?>(null) }
     var saving by rememberSaveable(entryId) { mutableStateOf(false) }
     var reflecting by rememberSaveable(entryId) { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) { container.nano.refresh() }
 
     LaunchedEffect(entryId) {
         val initial = if (entryId == null) repository.latestDraft() else repository.entry(entryId)
@@ -268,6 +273,41 @@ fun JournalEditorScreen(container: AppContainer, entryId: String?, onDone: () ->
                     }
                 }
                 Button(onClick = ::saveAndClose, enabled = ready && !saving, modifier = Modifier.weight(1f)) { Text("Save entry") }
+            }
+            if (nanoAvailability is NanoAvailability.Ready) {
+                TextButton(
+                    onClick = {
+                        if (body.isBlank()) {
+                            error = "Write a little first, then Drift can reflect it back to you."
+                            return@TextButton
+                        }
+                        val textAtRequest = body
+                        val moodAtRequest = mood
+                        val idAtRequest = actualId
+                        scope.launch {
+                            reflecting = true
+                            error = null
+                            reflection = ""
+                            runCatching {
+                                val saved = repository.saveEntry(idAtRequest, textAtRequest, moodAtRequest)
+                                val answer = container.nano.reflect(saved.body)
+                                repository.storeReflection(saved.id, saved.revision, answer)
+                                answer
+                            }.onSuccess { answer ->
+                                persistedBody = textAtRequest
+                                persistedMood = moodAtRequest
+                                if (body == textAtRequest) reflection = answer
+                                status = "Offline reflection saved"
+                            }.onFailure { error = it.message ?: "Drift could not create an offline reflection." }
+                            reflecting = false
+                        }
+                    },
+                    enabled = ready && !reflecting,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Rounded.AutoAwesome, contentDescription = null)
+                    Text("Reflect privately on this phone", modifier = Modifier.padding(start = DriftSpace.small))
+                }
             }
             ErrorText(error)
             if (reflection.isNotBlank() || reflecting) {

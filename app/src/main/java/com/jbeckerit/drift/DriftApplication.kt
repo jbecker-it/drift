@@ -2,6 +2,8 @@ package com.jbeckerit.drift
 
 import android.app.Application
 import com.jbeckerit.drift.ai.AiService
+import com.jbeckerit.drift.ai.OnDeviceAiService
+import com.jbeckerit.drift.backup.BackupService
 import com.jbeckerit.drift.data.DriftDatabase
 import com.jbeckerit.drift.data.DriftRepository
 import com.jbeckerit.drift.data.SecureSettings
@@ -27,6 +29,8 @@ class DriftApplication : Application() {
             settings = settings,
             repository = repository,
             ai = AiService(settings, repository),
+            nano = OnDeviceAiService(),
+            backup = BackupService(this, repository, settings),
             webDav = WebDavSync(repository),
             reminders = ReminderScheduler(this),
             work = scheduler,
@@ -40,6 +44,8 @@ data class AppContainer(
     val settings: SecureSettings,
     val repository: DriftRepository,
     val ai: AiService,
+    val nano: OnDeviceAiService,
+    val backup: BackupService,
     val webDav: WebDavSync,
     val reminders: ReminderScheduler,
     val work: WorkScheduler,
