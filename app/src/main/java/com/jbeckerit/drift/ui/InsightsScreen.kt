@@ -3,11 +3,18 @@ package com.jbeckerit.drift.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.ChatBubbleOutline
+import androidx.compose.material.icons.rounded.Insights
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,53 +32,72 @@ import java.time.LocalDate
 import java.time.ZoneId
 
 @Composable
-fun InsightsScreen(container: AppContainer) {
+fun ReflectScreen(container: AppContainer, onCoach: () -> Unit) {
     val entries by container.repository.observeEntries().collectAsStateWithLifecycle(initialValue = emptyList())
     val scope = rememberCoroutineScope()
     var summary by remember { mutableStateOf("") }
     var working by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    val words = remember(entries) { entries.sumOf { it.body.trim().split(Regex("\\s+")).count { word -> word.isNotBlank() } } }
+    val words = remember(entries) { entries.sumOf { it.body.trim().split(Regex("\\s+")).count(String::isNotBlank) } }
     val mood = remember(entries) { entries.mapNotNull { it.mood }.takeIf { it.isNotEmpty() }?.average() }
     val streak = remember(entries) { entryStreak(entries) }
 
-    LazyColumn(
+    androidx.compose.foundation.lazy.LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(DriftSpace.medium),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(start = DriftSpace.xLarge, end = DriftSpace.xLarge, bottom = DriftSpace.xLarge),
     ) {
-        item { ScreenTitle("Insights", "Patterns are shown from what you have actually saved.") }
+        item { ScreenTitle("Reflect", "Notice what is showing up, without needing to fix it.") }
         item {
-            SectionCard {
-                Text("Writing rhythm", style = MaterialTheme.typography.titleMedium)
-                Text("${entries.size} saved ${if (entries.size == 1) "entry" else "entries"} · $words words", modifier = Modifier.padding(top = 8.dp))
-                Text("Current streak: $streak ${if (streak == 1) "day" else "days"}", color = MaterialTheme.colorScheme.secondary)
-                if (mood != null) Text("Average mood: ${"%.1f".format(mood)} / 5", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SectionCard(emphasized = true) {
+                Icon(Icons.Rounded.ChatBubbleOutline, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Text("Talk it through", modifier = Modifier.padding(top = DriftSpace.medium), style = MaterialTheme.typography.titleLarge)
+                Text("A private conversation for sorting one thought at a time.", modifier = Modifier.padding(top = DriftSpace.xSmall), color = MaterialTheme.colorScheme.onPrimaryContainer)
+                Button(onClick = onCoach, modifier = Modifier.fillMaxWidth().padding(top = DriftSpace.large)) { Text("Open coach") }
             }
         }
         item {
             SectionCard {
-                Text("Weekly reflection", style = MaterialTheme.typography.titleMedium)
-                Text("This is generated only when you request it. Your recent saved entries are sent to the AI provider you configure.", modifier = Modifier.padding(top = 6.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(Icons.Rounded.Insights, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
+                Text("Your writing rhythm", modifier = Modifier.padding(top = DriftSpace.medium), style = MaterialTheme.typography.titleLarge)
+                Text(
+                    if (entries.isEmpty()) "A pattern will emerge after you have a few entries." else "$words words across ${entries.size} ${if (entries.size == 1) "entry" else "entries"}.",
+                    modifier = Modifier.padding(top = DriftSpace.xSmall),
+                )
+                if (entries.isNotEmpty()) {
+                    Text("Current rhythm: $streak ${if (streak == 1) "day" else "days"}", modifier = Modifier.padding(top = DriftSpace.small), color = MaterialTheme.colorScheme.primary)
+                    if (mood != null) Text("Average mood: ${"%.1f".format(mood)} / 5", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        item {
+            SectionCard {
+                Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
+                Text("A weekly reflection", modifier = Modifier.padding(top = DriftSpace.medium), style = MaterialTheme.typography.titleLarge)
+                Text("Ask only when it is useful. Recent saved entries are sent to the AI provider you configure.", modifier = Modifier.padding(top = DriftSpace.xSmall), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Button(
                     onClick = {
                         scope.launch {
-                            working = true; error = null
-                            runCatching { container.ai.weeklySummary() }.onSuccess { summary = it }.onFailure { error = it.message }
+                            working = true
+                            error = null
+                            runCatching { container.ai.weeklySummary() }
+                                .onSuccess { summary = it }
+                                .onFailure { error = it.message ?: "Drift could not create a weekly reflection." }
                             working = false
                         }
                     },
                     enabled = !working,
-                    modifier = Modifier.padding(top = 12.dp),
-                ) { Text(if (working) "Generating…" else "Generate summary") }
+                    modifier = Modifier.padding(top = DriftSpace.large),
+                ) {
+                    if (working) {
+                        CircularProgressIndicator(modifier = Modifier.padding(end = DriftSpace.small), strokeWidth = 2.dp)
+                        Text("Thinking")
+                    } else {
+                        Text(if (summary.isBlank()) "Create a reflection" else "Create another reflection")
+                    }
+                }
                 ErrorText(error)
-                if (summary.isNotBlank()) Text(summary, modifier = Modifier.padding(top = 12.dp))
-            }
-        }
-        item {
-            SectionCard {
-                Text("How this stays honest", style = MaterialTheme.typography.titleMedium)
-                Text("Drift does not infer a mood, streak, or trend from missing data. The numbers above come from entries stored on this device.", modifier = Modifier.padding(top = 6.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (summary.isNotBlank()) Text(summary, modifier = Modifier.padding(top = DriftSpace.large), style = MaterialTheme.typography.bodyLarge)
             }
         }
     }
@@ -84,6 +110,9 @@ private fun entryStreak(entries: List<Entry>): Int {
     var cursor = LocalDate.now(zone)
     if (cursor !in dates) cursor = cursor.minusDays(1)
     var streak = 0
-    while (cursor in dates) { streak++; cursor = cursor.minusDays(1) }
+    while (cursor in dates) {
+        streak++
+        cursor = cursor.minusDays(1)
+    }
     return streak
 }

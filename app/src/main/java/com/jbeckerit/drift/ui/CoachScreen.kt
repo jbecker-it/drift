@@ -1,17 +1,25 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package com.jbeckerit.drift.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.layout.weight
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -28,7 +36,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
-fun CoachScreen(container: AppContainer) {
+fun CoachScreen(container: AppContainer, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val messages = remember { mutableStateListOf<Message>() }
     var input by remember { mutableStateOf("") }
@@ -36,29 +44,38 @@ fun CoachScreen(container: AppContainer) {
     var error by remember { mutableStateOf<String?>(null) }
 
     Column(Modifier.fillMaxSize()) {
-        ScreenTitle("Coach", "A private conversation. Your journal is only shared when you ask Drift to use it.")
+        TopAppBar(
+            title = {
+                Column {
+                    Text("Coach")
+                    Text("A quiet place to think out loud.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+            navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back") } },
+        )
         if (messages.isEmpty()) {
-            SectionCard(Modifier.padding(horizontal = 20.dp)) {
-                Text("Start wherever you are", style = MaterialTheme.typography.titleMedium)
-                Text("Try: “I can’t decide what to do first,” or “Help me unpack why today felt hard.”", modifier = Modifier.padding(top = 6.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SectionCard(Modifier.padding(horizontal = DriftSpace.xLarge)) {
+                Text("Start wherever you are", style = MaterialTheme.typography.titleLarge)
+                Text("Try: “I can’t decide what to do first,” or “Help me unpack why today felt hard.”", modifier = Modifier.padding(top = DriftSpace.small), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
-            LazyColumn(
+            androidx.compose.foundation.lazy.LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(DriftSpace.small),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = DriftSpace.xLarge, vertical = DriftSpace.medium),
             ) {
-                itemsIndexed(messages) { _, message ->
-                    SectionCard {
+                items(messages.size) { index ->
+                    val message = messages[index]
+                    SectionCard(emphasized = message.role == "user") {
                         Text(if (message.role == "user") "You" else "Drift", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
-                        Text(message.content.ifBlank { "Thinking…" }, modifier = Modifier.padding(top = 4.dp))
+                        Text(message.content.ifBlank { "Thinking…" }, modifier = Modifier.padding(top = DriftSpace.xSmall), style = MaterialTheme.typography.bodyLarge)
                     }
                 }
             }
         }
-        Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
+        Column(Modifier.padding(horizontal = DriftSpace.xLarge, vertical = DriftSpace.medium)) {
             ErrorText(error)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(DriftSpace.small), modifier = Modifier.fillMaxWidth()) {
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it; error = null },
@@ -70,14 +87,19 @@ fun CoachScreen(container: AppContainer) {
                 Button(
                     enabled = !working && input.isNotBlank(),
                     onClick = {
-                        val prompt = input.trim(); input = ""; working = true; error = null
+                        val prompt = input.trim()
+                        input = ""
+                        working = true
+                        error = null
                         messages += Message("user", prompt)
                         messages += Message("assistant", "")
                         val answerIndex = messages.lastIndex
                         scope.launch {
                             runCatching {
                                 container.ai.coach(messages.dropLast(2), prompt) { chunk ->
-                                    withContext(Dispatchers.Main.immediate) { messages[answerIndex] = messages[answerIndex].copy(content = messages[answerIndex].content + chunk) }
+                                    withContext(Dispatchers.Main.immediate) {
+                                        messages[answerIndex] = messages[answerIndex].copy(content = messages[answerIndex].content + chunk)
+                                    }
                                 }
                             }.onFailure {
                                 messages.removeAt(answerIndex)
@@ -86,7 +108,7 @@ fun CoachScreen(container: AppContainer) {
                             working = false
                         }
                     },
-                ) { Text(if (working) "…" else "Send") }
+                ) { Icon(Icons.Rounded.Send, contentDescription = "Send") }
             }
         }
     }

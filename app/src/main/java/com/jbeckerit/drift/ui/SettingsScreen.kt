@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package com.jbeckerit.drift.ui
 
 import android.Manifest
@@ -16,6 +18,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -34,7 +41,7 @@ import com.jbeckerit.drift.data.SyncSettings
 import kotlinx.coroutines.launch
 
 @Composable
-fun SettingsScreen(container: AppContainer) {
+fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
     val state by container.settings.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var key by remember { mutableStateOf("") }
@@ -60,12 +67,21 @@ fun SettingsScreen(container: AppContainer) {
         syncEnabled = state.sync.enabled; syncUrl = state.sync.url; syncUser = state.sync.username; syncPassword = state.sync.password
     }
 
-    LazyColumn(
+    Column(Modifier.fillMaxSize()) {
+        TopAppBar(
+            title = {
+                Column {
+                    Text("Settings")
+                    Text("Private controls, kept out of your way.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+            navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back") } },
+        )
+        LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
     ) {
-        item { ScreenTitle("Settings", "Sensitive credentials are encrypted with Android Keystore on this device.") }
         item {
             SectionCard {
                 Text("AI", style = MaterialTheme.typography.titleMedium)
@@ -134,6 +150,7 @@ fun SettingsScreen(container: AppContainer) {
                 ErrorText(error)
                 if (status.isNotBlank()) Text(status, modifier = Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.secondary)
             }
+        }
         }
     }
 }

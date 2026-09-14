@@ -7,13 +7,13 @@ plugins {
 
 android {
     namespace = "com.jbeckerit.drift"
-    compileSdk = 35
+    compileSdk = 36
     defaultConfig {
         applicationId = "com.jbeckerit.drift"
-        minSdk = 26
-        targetSdk = 35
-        versionCode = 1
-        versionName = "2.0.0"
+        minSdk = 36
+        targetSdk = 36
+        versionCode = 2
+        versionName = "2.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildTypes {
